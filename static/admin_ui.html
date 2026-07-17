@@ -930,7 +930,7 @@ function initials(name) {
 
 function updateRoleUI() {
   const topbar = document.getElementById('user-topbar');
-  if (topbar) topbar.classList.toggle('visible', !!(CURRENT_ROLE && SESSION_TOKEN));
+  if (topbar) topbar.classList.toggle('visible', !!SESSION_TOKEN);
   const usernameEl = document.getElementById('topbar-username');
   const roleTextEl = document.getElementById('topbar-role-text');
   const avatarEl   = document.getElementById('topbar-avatar');
@@ -951,15 +951,8 @@ function updateRoleUI() {
     roleEl.style.display = CURRENT_ROLE ? 'block' : 'none';
   }
   document.querySelectorAll('.nav-item[data-page]').forEach(el => {
-    const p = el.dataset.page;
-    let show = true;
-    if (p === 'dashboard')    show = can('dashboard');
-    if (p === 'campaigns')    show = can('view_campaigns');
-    if (p === 'new-campaign') show = can('create_campaign');
-    if (p === 'recipients')   show = can('view_recipients') || can('add_recipients');
-    if (p === 'reports')      show = can('report');
-    el.style.display = show ? '' : 'none';
-  });
+  el.style.display = '';
+});
 }
 
 function _istGreetingSample() {
@@ -1007,16 +1000,13 @@ async function syncClerkSession() {
     const res = await fetch(`${API_BASE}/auth/clerk/session`, { method: 'POST', credentials: 'include' });
     const data = await res.json();
     if (!res.ok) { _clerkErr(data.error || 'Sign-in failed'); return; }
-    if (!data.role) {
-      _clerkErr(`Signed in as ${data.email || data.name}, but no role is assigned yet. Ask an admin to set your role in the Clerk Dashboard (User -> Metadata -> Public: {"role": "admin"}).`);
-      return;
-    }
+    
     SESSION_TOKEN    = 'clerk';
-    CURRENT_ROLE     = data.role;
+    CURRENT_ROLE = '';
     CURRENT_USERNAME = data.name || data.email;
     SESSION_STARTED_AT = new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'});
     localStorage.setItem('phish_session_token', 'clerk');
-    localStorage.setItem('phish_role', CURRENT_ROLE);
+   localStorage.removeItem('phish_role');
     localStorage.setItem('phish_username', CURRENT_USERNAME);
     document.getElementById('login-overlay').style.display = 'none';
     updateRoleUI();
@@ -2518,10 +2508,10 @@ function renderSettings() {
       const res = await fetch(`${API_BASE}/phish/me`, { headers: headers() });
       if (res.ok) {
         const data = await res.json();
-        CURRENT_ROLE     = data.role || null;
+        CURRENT_ROLE     =null;
         CURRENT_USERNAME = data.username || '';
         SESSION_STARTED_AT = SESSION_STARTED_AT || new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'});
-        localStorage.setItem('phish_role',     CURRENT_ROLE     || '');
+        localStorage.removeItem('phish_role');
         localStorage.setItem('phish_username', CURRENT_USERNAME);
       } else {
         SESSION_TOKEN = ''; CURRENT_ROLE = null; CURRENT_USERNAME = '';
