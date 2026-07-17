@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign in to Microsoft 365</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #f3f2f1;
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* ---- Main card ---- */
+    .login-box {
+      background: #ffffff;
+      width: 440px;
+      padding: 44px 44px 36px;
+      box-shadow: 0 2px 6px rgba(0,0,0,.2);
+    }
+
+    /* Microsoft 2×2 logo squares */
+    .ms-logo { display: flex; gap: 3px; margin-bottom: 20px; }
+
+    h1 { font-size: 1.5rem; font-weight: 600; color: #1b1b1b; margin-bottom: 12px; line-height: 1.3; }
+    .subtitle { font-size: .875rem; color: #444; margin-bottom: 28px; }
+
+    /* Email display strip (step 2) */
+    .email-strip {
+      display: none; align-items: center; gap: 8px;
+      font-size: .875rem; color: #1b1b1b; margin-bottom: 20px;
+      padding: 8px 10px; background: #f8f8f8; border: 1px solid #e0e0e0; cursor: pointer;
+    }
+    .email-strip:hover { background: #ededed; }
+    .email-strip .avatar {
+      width: 28px; height: 28px; border-radius: 50%;
+      background: #0078d4; color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: .75rem; font-weight: 700; flex-shrink: 0;
+    }
+
+    /* Form inputs */
+    .form-group { margin-bottom: 8px; position: relative; }
+    input[type="email"], input[type="password"] {
+      width: 100%; padding: 8px 10px;
+      font-size: .9375rem; font-family: inherit;
+      border: 1px solid #666; outline: none; color: #1b1b1b;
+      transition: border-color .15s;
+    }
+    input:focus { border-color: #0078d4; border-width: 2px; padding: 7px 9px; }
+    input::placeholder { color: #999; font-size: .875rem; }
+
+    .field-error { font-size: .75rem; color: #c50f1f; margin-top: 4px; display: none; }
+
+    /* Checkbox */
+    .remember {
+      display: flex; align-items: flex-start; gap: 8px;
+      font-size: .8125rem; color: #1b1b1b; margin: 16px 0 20px;
+    }
+    .remember input[type="checkbox"] { margin-top: 2px; accent-color: #0078d4; }
+
+    /* Buttons */
+    .btn-next, .btn-back {
+      width: 100%; padding: 8px 12px;
+      font-size: .9375rem; font-family: inherit; font-weight: 600;
+      cursor: pointer; border: none; transition: background .15s;
+    }
+    .btn-next  { background: #0078d4; color: #fff; margin-bottom: 8px; }
+    .btn-next:hover { background: #006cbe; }
+    .btn-back  { background: transparent; color: #0078d4; border: 1px solid transparent; }
+    .btn-back:hover { border-color: #0078d4; }
+
+    .footer-links {
+      font-size: .73rem; color: #666;
+      margin-top: 28px; display: flex; gap: 16px; flex-wrap: wrap;
+    }
+    .footer-links a { color: inherit; text-decoration: none; }
+    .footer-links a:hover { text-decoration: underline; }
+
+    /* Loading overlay */
+    .loading-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(255,255,255,.8); z-index: 100;
+      flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+    }
+    .loading-overlay.show { display: flex; }
+    .spinner {
+      width: 36px; height: 36px;
+      border: 3px solid #e0e0e0; border-top-color: #0078d4;
+      border-radius: 50%; animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-msg { font-size: .875rem; color: #444; }
+
+    /* ===== Security Awareness Warning ===== */
+    .warning-banner {
+      display: none; position: fixed; inset: 0;
+      background: #fff; z-index: 200;
+      flex-direction: column; align-items: center; justify-content: center;
+      padding: 40px; text-align: center;
+    }
+    .warning-banner.show { display: flex; }
+    .warning-icon { font-size: 4rem; margin-bottom: 16px; }
+    .warning-title { font-size: 1.5rem; font-weight: 700; color: #c50f1f; margin-bottom: 12px; }
+    .warning-body {
+      font-size: .9375rem; color: #333; max-width: 520px; line-height: 1.7;
+      border: 2px solid #c50f1f; border-radius: 8px; padding: 20px 24px;
+      margin-bottom: 20px; text-align: left;
+    }
+    .warning-body ul { margin: 10px 0 0 20px; }
+    .warning-body ul li { margin-bottom: 6px; }
+    .warning-btn {
+      padding: 12px 40px; background: #0078d4; color: #fff; border: none;
+      font-size: .9375rem; font-weight: 600; cursor: pointer; border-radius: 2px;
+    }
+    .warning-btn:hover { background: #006cbe; }
+    .warning-sub { font-size: .8rem; color: #888; margin-top: 10px; }
+
+    /* Step 2 hidden by default */
+    #step2 { display: none; }
+  </style>
+</head>
+<body>
+
+<!-- Loading overlay -->
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="spinner"></div>
+  <div class="loading-msg">Signing in…</div>
+</div>
+
+<!-- Security Awareness Training warning (shown after form submit) -->
+<div class="warning-banner" id="warningBanner">
+  <div class="warning-icon">🎣</div>
+  <div class="warning-title">⚠️ PHISHING SIMULATION — DO NOT PANIC</div>
+  <div class="warning-body">
+    <strong>This was a controlled phishing awareness test</strong> conducted by your IT Security team.<br><br>
+    You visited a fake Microsoft 365 login page — real attackers use identical-looking pages to steal passwords.<br><br>
+    <strong>Key takeaways:</strong>
+    <ul>
+      <li>Always verify the URL in your browser before entering credentials.<br>
+          The real Microsoft sign-in URL is <strong>login.microsoftonline.com</strong></li>
+      <li>Look for the padlock (🔒) and confirm the domain is exactly correct.</li>
+      <li>When in doubt, go directly to the site — do <strong>not</strong> use email links.</li>
+      <li>Report suspicious emails to your IT Security team immediately.</li>
+    </ul>
+  </div>
+  <button class="warning-btn" id="warningOkBtn">I Understand — Take Me to the Real Sign-in</button>
+  <div class="warning-sub" id="redirectNote"></div>
+</div>
+
+<!-- Microsoft 365 fake login card -->
+<div class="login-box">
+
+  <!-- Microsoft 2×2 squares logo -->
+  <div class="ms-logo">
+    <svg width="52" height="52" viewBox="0 0 23 23" xmlns="http://www.w3.org/2000/svg">
+      <rect x="1"  y="1"  width="10" height="10" fill="#f25022"/>
+      <rect x="12" y="1"  width="10" height="10" fill="#7fba00"/>
+      <rect x="1"  y="12" width="10" height="10" fill="#00a4ef"/>
+      <rect x="12" y="12" width="10" height="10" fill="#ffb900"/>
+    </svg>
+  </div>
+
+  <!-- Step 1: email -->
+  <div id="step1">
+    <h1>Sign in</h1>
+    <p class="subtitle">Use your Microsoft account</p>
+    <form id="step1Form" autocomplete="off" novalidate>
+      <div class="form-group">
+        <input type="email" id="emailInput" placeholder="Email, phone, or Skype"
+               autocomplete="username" spellcheck="false" required />
+        <div class="field-error" id="emailError">Enter a valid email address.</div>
+      </div>
+      <div class="remember">
+        <input type="checkbox" id="rememberMe" checked />
+        <label for="rememberMe">Keep me signed in</label>
+      </div>
+      <button type="submit" class="btn-next">Next</button>
+      <button type="button" class="btn-back"
+        onclick="window.open('https://support.microsoft.com/','_blank')">
+        Create account
+      </button>
+    </form>
+  </div>
+
+  <!-- Step 2: password -->
+  <div id="step2">
+    <div class="email-strip" id="emailStrip" onclick="goBack()">
+      <div class="avatar" id="avatarInitial">?</div>
+      <span id="emailDisplay"></span>
+    </div>
+    <h1>Enter password</h1>
+    <form id="step2Form" autocomplete="off" novalidate>
+      <div class="form-group">
+        <input type="password" id="passwordInput" placeholder="Password"
+               autocomplete="current-password" required />
+        <div class="field-error" id="pwError">Please enter your password.</div>
+      </div>
+      <div class="remember">
+        <input type="checkbox" id="staySignedIn" checked />
+        <label for="staySignedIn">Stay signed in?</label>
+      </div>
+      <button type="submit" class="btn-next">Sign in</button>
+      <button type="button" class="btn-back" onclick="goBack()">Back</button>
+    </form>
+    <div class="footer-links">
+      <a href="#">Forgot password?</a>
+      <a href="#">Sign-in options</a>
+    </div>
+  </div>
+
+  <div class="footer-links" id="step1Footer">
+    <a href="#">Terms of use</a>
+    <a href="#">Privacy &amp; cookies</a>
+  </div>
+</div>
+
+<script>
+  /*
+   * =====================================================================
+   * PHISHING AWARENESS LANDING PAGE
+   * Served by Flask at:
+   *   GET /api/phish/landing/{token}
+   *
+   * Clicks are recorded via /api/track/ping/{token} only after real-user
+   * interaction (scanner traffic is filtered server-side).
+   * =====================================================================
+   */
+  const _redirect = '__REDIRECT_URL__';          // injected by Azure Function
+  const _orgName  = '__ORG_NAME__';              // injected by Azure Function
+
+  /* ---- Step 1: email ---- */
+  document.getElementById('step1Form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const email = document.getElementById('emailInput').value.trim();
+    const errEl = document.getElementById('emailError');
+    if (!email || !email.includes('@')) {
+      errEl.style.display = 'block';
+      document.getElementById('emailInput').focus();
+      return;
+    }
+    errEl.style.display = 'none';
+    document.getElementById('emailDisplay').textContent = email;
+    document.getElementById('avatarInitial').textContent = email[0].toUpperCase();
+    document.getElementById('step1').style.display = 'none';
+    document.getElementById('step1Footer').style.display = 'none';
+    document.getElementById('step2').style.display = 'block';
+    document.getElementById('emailStrip').style.display = 'flex';
+    document.getElementById('passwordInput').focus();
+  });
+
+  function goBack() {
+    document.getElementById('step2').style.display = 'none';
+    document.getElementById('step1').style.display = 'block';
+    document.getElementById('step1Footer').style.display = 'flex';
+    document.getElementById('emailInput').focus();
+  }
+
+  /* ---- Step 2: password ---- */
+  document.getElementById('step2Form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const pw = document.getElementById('passwordInput').value;
+    const errEl = document.getElementById('pwError');
+    if (!pw) {
+      errEl.style.display = 'block';
+      document.getElementById('passwordInput').focus();
+      return;
+    }
+    errEl.style.display = 'none';
+
+    // Guaranteed real-user click signal on credential submit.
+    if (typeof window.__phishReportClick === 'function') {
+      window.__phishReportClick('password-submit');
+    }
+
+    document.getElementById('loadingOverlay').classList.add('show');
+    // After 1.5s show phishing awareness warning
+    setTimeout(function() {
+      document.getElementById('loadingOverlay').classList.remove('show');
+      if (_redirect && _redirect !== '__REDIRECT_URL__') {
+        document.getElementById('redirectNote').textContent =
+          'You will be redirected to ' + _redirect + ' in a moment.';
+      }
+      document.getElementById('warningBanner').classList.add('show');
+    }, 1500);
+  });
+
+  /* ---- Warning "I understand" ---- */
+  document.getElementById('warningOkBtn').addEventListener('click', function() {
+    if (typeof window.__phishReportClick === 'function') {
+      window.__phishReportClick('warning-confirm');
+    }
+    const dest = (_redirect && _redirect !== '__REDIRECT_URL__')
+      ? _redirect
+      : 'https://login.microsoftonline.com';
+    window.location.href = dest;
+  });
+
+  /* =====================================================================
+   * REAL-USER CLICK DETECTION
+   * ---------------------------------------------------------------------
+   * Email security scanners (Microsoft Defender Safe Links, Proofpoint,
+   * Mimecast, etc.) follow links to scan them but DO NOT:
+   *   - render JavaScript
+   *   - move the mouse
+   *   - press keys
+   *   - scroll the page
+   *   - submit forms
+   * We therefore only record the click after at least ONE real-user
+   * interaction signal is observed. The /api/track/ping/<token> endpoint
+   * does the actual mark_clicked() call (with its own bot-UA + time-window
+   * guards as a second line of defence).
+   * ===================================================================== */
+  (function () {
+    var token = '__TRACKING_TOKEN__';
+    if (!token || token === '__TRACKING_TOKEN__') {
+      console.warn('[phish] no tracking token injected; click ping disabled');
+      return;
+    }
+    console.log('[phish] real-user click detector armed for token', token.substring(0, 8) + '…');
+
+    var pinged = false;
+    function reportRealClick(reason) {
+      if (pinged) return;
+      pinged = true;
+      console.log('[phish] real-user signal:', reason, '— sending click ping');
+      try {
+        var url = '/api/track/ping/' + encodeURIComponent(token);
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(url);
+        } else {
+          fetch(url, { method: 'GET', credentials: 'omit', cache: 'no-store', keepalive: true })
+            .catch(function () { /* swallow */ });
+        }
+      } catch (e) { /* ignore */ }
+      // Remove listeners after first signal
+      window.removeEventListener('mousemove',     onSig, true);
+      window.removeEventListener('mousedown',     onSig, true);
+      window.removeEventListener('pointerdown',   onSig, true);
+      window.removeEventListener('keydown',       onSig, true);
+      window.removeEventListener('scroll',        onSig, true);
+      window.removeEventListener('wheel',         onSig, true);
+      window.removeEventListener('touchstart',    onSig, true);
+      window.removeEventListener('click',         onSig, true);
+      window.removeEventListener('focus',         onSig, true);
+      document.removeEventListener('visibilitychange', onVis, true);
+    }
+    function onSig(ev) { reportRealClick(ev.type); }
+    function onVis()   { if (document.visibilityState === 'visible') reportRealClick('visibilitychange'); }
+
+    // Expose for explicit submit/click handlers above.
+    window.__phishReportClick = reportRealClick;
+
+    function arm() {
+      window.addEventListener('mousemove',   onSig, true);
+      window.addEventListener('mousedown',   onSig, true);
+      window.addEventListener('pointerdown', onSig, true);
+      window.addEventListener('keydown',     onSig, true);
+      window.addEventListener('scroll',      onSig, true);
+      window.addEventListener('wheel',       onSig, true);
+      window.addEventListener('touchstart',  onSig, true);
+      window.addEventListener('click',       onSig, true);
+      window.addEventListener('focus',       onSig, true);
+      document.addEventListener('visibilitychange', onVis, true);
+      // Fallback: if no user-interaction signal arrives within 2s but the
+      // page reached this point (i.e. JS executed in a real browser, since
+      // scanners typically don't run JS), record the click anyway. The
+      // server still applies bot-IP / bot-UA / time-window filters as a
+      // second line of defence at /api/track/ping/<token>.
+      setTimeout(function () { reportRealClick('page-loaded'); }, 2000);
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', arm);
+    } else {
+      arm();
+    }
+  })();
+</script>
+</body>
+</html>

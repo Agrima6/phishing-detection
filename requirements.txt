@@ -1,0 +1,26 @@
+# Flask web framework
+flask==3.1.0
+
+# Production WSGI server
+gunicorn==23.0.0
+
+# Local dev: load environment variables from .env file
+python-dotenv==1.0.1
+
+# SendGrid – send emails via HTTPS (no SMTP port issues)
+sendgrid==6.11.0
+
+# Google GenAI SDK – server-side AI email content generation via Gemini (Service Account)
+google-genai>=1.5.0
+
+# Google Auth – Service Account credential loading
+google-auth>=2.29.0
+
+# Azure SQL (MSSQL) – production database driver
+pyodbc==5.2.0
+
+# DNS lookups – validate email domains (MX records) before sending
+dnspython==2.8.0
+
+# Clerk – authentication for the admin dashboard
+clerk-backend-api>=6.0.0

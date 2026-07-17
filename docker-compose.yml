@@ -1,0 +1,31 @@
+services:
+  phishing-dashboard:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # --- Required ---
+      SQL_SERVER: "email-stimulation-prod.database.windows.net"
+      SQL_DATABASE: "phishing"
+      SQL_USERNAME: "emailprod"
+      SQL_PASSWORD: "${SQL_PASSWORD}"
+
+      # Graph Email API
+      GRAPH_EMAIL_API_URL: "${GRAPH_EMAIL_API_URL}"
+
+      # Public base URL (set to your domain in production)
+      PHISHING_BASE_URL: "https://email-stimulation.agreeableisland-070e96d9.centralus.azurecontainerapps.io"
+
+      # Google Gemini AI (optional)
+      GOOGLE_SERVICE_ACCOUNT_JSON: "${GOOGLE_SERVICE_ACCOUNT_JSON:-}"
+      GOOGLE_GENAI_MODEL: "${GOOGLE_GENAI_MODEL:-gemini-2.5-flash-lite}"
+      GOOGLE_CLOUD_LOCATION: "${GOOGLE_CLOUD_LOCATION:-us-central1}"
+
+      # Clerk (admin dashboard login)
+      CLERK_PUBLISHABLE_KEY: "${CLERK_PUBLISHABLE_KEY:-}"
+      CLERK_SECRET_KEY: "${CLERK_SECRET_KEY:-}"
+      SECRET_KEY: "${SECRET_KEY:-}"
+
+      # Daily email quota
+      DAILY_EMAIL_LIMIT: "${DAILY_EMAIL_LIMIT:-2000}"
+    restart: unless-stopped

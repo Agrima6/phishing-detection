@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(pip3 --version)",
+      "Bash(python3 -m venv clerk_check_venv)",
+      "Bash(./clerk_check_venv/bin/pip install *)",
+      "Bash(./clerk_check_venv/bin/pip show *)",
+      "Bash(./clerk_check_venv/bin/python3 -c ' *)",
+      "Bash(rm -rf clerk_check_venv)",
+      "Bash(python3 -m venv v2)",
+      "Bash(./v2/bin/pip install *)",
+      "Bash(./v2/bin/python3 -c ' *)",
+      "Bash(rm -rf v2)",
+      "WebFetch(domain:clerk.com)",
+      "Bash(npm view *)",
+      "Bash(tar xzf *)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -m py_compile app.py config.py auth_clerk.py phishing_campaign_service.py gemini_service.py)"
+    ]
+  }
+}

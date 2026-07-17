@@ -1,0 +1,2545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhishDash — Phishing Awareness Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Clerk (admin login) – src/publishable key are injected server-side in app.py's admin_ui() route -->
+  <script
+    defer
+    crossorigin="anonymous"
+    data-clerk-publishable-key="__CLERK_PUBLISHABLE_KEY__"
+    src="https://__CLERK_FRONTEND_API__/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
+    type="text/javascript"
+  ></script>
+  <style>
+    :root {
+      --bg: #0B1220;
+      --surface: #111827;
+      --surface-hover: #1F2937;
+      --surface-raised: #16202f;
+      --border: rgba(255,255,255,.08);
+      --border-strong: rgba(255,255,255,.16);
+      --text: #E5E9F0;
+      --text-secondary: #94A3B8;
+      --muted: #64748B;
+
+      --blue: #3B82F6;
+      --blue-hover: #2563EB;
+      --blue-tint: rgba(59,130,246,.12);
+      --success: #22C55E;
+      --success-tint: rgba(34,197,94,.12);
+      --warn: #F59E0B;
+      --warn-tint: rgba(245,158,11,.12);
+      --danger: #EF4444;
+      --danger-tint: rgba(239,68,68,.12);
+      --purple: #A78BFA;
+      --purple-tint: rgba(167,139,250,.12);
+
+      /* Legacy aliases kept so nothing that reads these tokens breaks */
+      --accent: var(--blue);
+      --accent2: #38BDF8;
+
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,.3);
+      --shadow-md: 0 4px 16px rgba(0,0,0,.28);
+      --shadow-lg: 0 12px 32px rgba(0,0,0,.36);
+      --ease: cubic-bezier(.4,0,.2,1);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { -webkit-font-smoothing: antialiased; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      min-height: 100vh; font-size: 14px; line-height: 1.6;
+    }
+    a { color: inherit; }
+    ::selection { background: var(--blue-tint); }
+
+    /* ---------- Focus & a11y ---------- */
+    a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible,
+    textarea:focus-visible, [role="button"]:focus-visible, [tabindex]:focus-visible {
+      outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px;
+    }
+    .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; }
+
+    /* ---------- Scrollbars ---------- */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }
+
+    /* ---------- Layout shell ---------- */
+    .shell { display: flex; min-height: 100vh; }
+
+    /* ---------- Sidebar ---------- */
+    .sidebar {
+      width: 264px; flex-shrink: 0; background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column;
+      position: sticky; top: 0; height: 100vh; overflow-y: auto;
+      transition: transform .2s var(--ease);
+      z-index: 60;
+    }
+    .sidebar-brand {
+      display: flex; align-items: center; gap: 10px;
+      padding: 20px 20px 16px; border-bottom: 1px solid var(--border);
+    }
+    .brand-mark {
+      width: 32px; height: 32px; border-radius: 8px; background: var(--blue-tint);
+      color: var(--blue); display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .brand-mark i { width: 18px; height: 18px; }
+    .brand-name { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+    .brand-sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+    .sidebar-body { padding: 16px 12px; display: flex; flex-direction: column; gap: 20px; flex: 1; }
+    .nav-group-label {
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--muted); padding: 0 12px; margin-bottom: 6px;
+    }
+    .nav-group { display: flex; flex-direction: column; gap: 2px; }
+    .nav-item {
+      padding: 9px 12px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13.5px; font-weight: 500;
+      display: flex; align-items: center; gap: 10px; color: var(--text-secondary);
+      transition: background .15s var(--ease), color .15s var(--ease); position: relative;
+      border-left: 2px solid transparent;
+    }
+    .nav-item i { width: 17px; height: 17px; flex-shrink: 0; }
+    .nav-item:hover { background: var(--surface-hover); color: var(--text); }
+    .nav-item.active { background: var(--blue-tint); color: var(--blue); font-weight: 600; }
+
+    #sidebar-role {
+      margin: 4px 12px 0; font-size: 12px; font-weight: 600; padding: 8px 0; display: none;
+      border-top: 1px solid var(--border);
+    }
+
+    .sidebar-backdrop {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 55;
+    }
+
+    /* ---------- Topbar ---------- */
+    .topbar {
+      display: none; align-items: center; gap: 16px;
+      padding: 12px 28px; background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 40;
+    }
+    .topbar.visible { display: flex; }
+    .topbar-menu-btn {
+      display: none; background: none; border: 1px solid var(--border); color: var(--text-secondary);
+      width: 34px; height: 34px; border-radius: var(--radius-sm); align-items: center; justify-content: center; cursor: pointer;
+      flex-shrink: 0;
+    }
+    .topbar-menu-btn i { width: 17px; height: 17px; }
+
+    .topbar-search {
+      flex: 1; max-width: 380px; position: relative; display: flex; align-items: center;
+    }
+    .topbar-search i {
+      position: absolute; left: 12px; width: 15px; height: 15px; color: var(--muted); pointer-events: none;
+    }
+    .topbar-search input {
+      width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text);
+      border-radius: var(--radius-sm); padding: 8px 12px 8px 34px; font-size: 13px; outline: none;
+      transition: border-color .15s var(--ease), background .15s var(--ease);
+    }
+    .topbar-search input:focus { border-color: var(--border-strong); background: var(--surface-hover); }
+    .topbar-search input::placeholder { color: var(--muted); }
+
+    .topbar-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+
+    .icon-btn {
+      width: 34px; height: 34px; border-radius: var(--radius-sm); border: 1px solid transparent;
+      background: none; color: var(--text-secondary); display: flex; align-items: center; justify-content: center;
+      cursor: pointer; transition: background .15s var(--ease), color .15s var(--ease); position: relative;
+    }
+    .icon-btn:hover { background: var(--surface-hover); color: var(--text); }
+    .icon-btn i { width: 17px; height: 17px; }
+    .icon-btn .dot {
+      position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%;
+      background: var(--danger); border: 2px solid var(--bg);
+    }
+
+    .env-pill {
+      font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+      text-transform: uppercase; letter-spacing: .04em;
+    }
+    .env-dev  { background: var(--warn-tint); color: var(--warn); }
+    .env-prod { background: var(--success-tint); color: var(--success); }
+
+    .profile-trigger {
+      display: flex; align-items: center; gap: 8px; padding: 5px 10px 5px 6px; border-radius: var(--radius-sm);
+      cursor: pointer; border: 1px solid transparent; background: none; color: var(--text);
+      transition: background .15s var(--ease);
+    }
+    .profile-trigger:hover { background: var(--surface-hover); }
+    .profile-trigger i.chev { width: 14px; height: 14px; color: var(--muted); }
+    .avatar {
+      width: 28px; height: 28px; border-radius: 50%; background: var(--blue-tint); color: var(--blue);
+      display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0;
+    }
+    .profile-name { font-size: 13px; font-weight: 600; line-height: 1.2; }
+    .profile-role { font-size: 11px; color: var(--muted); line-height: 1.2; }
+
+    .dropdown-wrap { position: relative; }
+    .dropdown-panel {
+      display: none; position: absolute; top: calc(100% + 8px); right: 0; min-width: 240px;
+      background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: var(--shadow-lg); padding: 8px; z-index: 70;
+    }
+    .dropdown-panel.open { display: block; }
+    .dropdown-header { padding: 10px 10px 8px; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
+    .dropdown-header .name { font-size: 13.5px; font-weight: 600; }
+    .dropdown-header .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .dropdown-item {
+      display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: var(--radius-sm);
+      font-size: 13px; cursor: pointer; color: var(--text-secondary); transition: background .15s var(--ease), color .15s var(--ease);
+    }
+    .dropdown-item:hover { background: var(--surface-hover); color: var(--text); }
+    .dropdown-item i { width: 15px; height: 15px; }
+    .dropdown-empty { padding: 16px 10px; text-align: center; font-size: 12.5px; color: var(--muted); }
+
+    /* ---------- Main ---------- */
+    .main { flex: 1; padding: 32px 32px 56px; overflow-y: auto; min-width: 0; }
+    @media (max-width: 720px) { .main { padding: 20px 16px 40px; } }
+
+    .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 28px; flex-wrap: wrap; }
+    .page-title { font-size: 30px; font-weight: 700; letter-spacing: -.02em; display: flex; align-items: center; gap: 12px; }
+    .page-title i { width: 26px; height: 26px; color: var(--blue); flex-shrink: 0; }
+    .page-subtitle { font-size: 13.5px; color: var(--text-secondary); margin-top: 6px; }
+    .page-header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .live-indicator { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+    .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-tint); }
+
+    /* ---------- Cards ---------- */
+    .card {
+      background: var(--surface); border-radius: var(--radius); padding: 24px;
+      border: 1px solid var(--border); margin-bottom: 24px;
+    }
+    .card-title { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
+    .card-header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+    .card-header-row .titles { display: flex; flex-direction: column; gap: 4px; }
+    .card-header-row h3 { font-size: 16px; font-weight: 600; }
+    .card-header-row .sub { font-size: 12.5px; color: var(--muted); }
+    .card-tools { display: flex; align-items: center; gap: 6px; }
+    .stat-value { font-size: 2rem; font-weight: 700; }
+    .stat-sub { font-size: .8rem; color: var(--muted); margin-top: 4px; }
+
+    /* ---------- KPI cards ---------- */
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 28px; }
+    .kpi-card {
+      background: var(--surface); border-radius: var(--radius); padding: 22px;
+      border: 1px solid var(--border); transition: transform .18s var(--ease), box-shadow .18s var(--ease), border-color .18s var(--ease);
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .kpi-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--border-strong); }
+    .kpi-top { display: flex; align-items: flex-start; justify-content: space-between; }
+    .kpi-icon {
+      width: 34px; height: 34px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .kpi-icon i { width: 17px; height: 17px; }
+    .kpi-card .value { font-size: 38px; font-weight: 700; letter-spacing: -.02em; line-height: 1; font-variant-numeric: tabular-nums; }
+    .kpi-card .label { font-size: 13.5px; color: var(--text-secondary); font-weight: 500; }
+    .kpi-trend { display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 600; }
+    .kpi-trend i { width: 13px; height: 13px; }
+    .kpi-trend.up { color: var(--success); }
+    .kpi-trend.down { color: var(--danger); }
+    .kpi-trend.flat { color: var(--muted); }
+    .kpi-desc { font-size: 12px; color: var(--muted); }
+
+    /* ---------- Tables ---------- */
+    .table-scroll { overflow-x: auto; border-radius: var(--radius-sm); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th {
+      text-align: left; padding: 11px 14px; color: var(--muted); font-weight: 600; font-size: 11.5px;
+      text-transform: uppercase; letter-spacing: .04em;
+      border-bottom: 1px solid var(--border); background: var(--surface);
+      position: sticky; top: 0; z-index: 5; white-space: nowrap;
+    }
+    td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; color: var(--text); }
+    tbody tr { transition: background .12s var(--ease); }
+    tbody tr:hover { background: var(--surface-hover); }
+    tbody tr:last-child td { border-bottom: none; }
+
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px;
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
+      background: var(--surface-hover); color: var(--text-secondary);
+    }
+    .badge i { width: 11px; height: 11px; }
+    .badge-draft     { background: var(--surface-hover); color: var(--text-secondary); }
+    .badge-active    { background: var(--success-tint); color: var(--success); }
+    .badge-sent      { background: var(--blue-tint); color: var(--blue); }
+    .badge-opened    { background: var(--success-tint); color: var(--success); }
+    .badge-clicked   { background: var(--warn-tint); color: var(--warn); }
+    .badge-completed { background: var(--blue-tint); color: var(--blue); }
+    .badge-pending   { background: var(--warn-tint); color: var(--warn); }
+    .badge-failed, .badge-invalid_domain, .badge-undeliverable { background: var(--danger-tint); color: var(--danger); }
+    .badge-unknown   { background: var(--surface-hover); color: var(--text-secondary); }
+
+    /* ---------- Forms ---------- */
+    .form-group { margin-bottom: 16px; }
+    label { display: block; font-size: 13px; color: var(--text-secondary); font-weight: 500; margin-bottom: 6px; }
+    input[type="text"], input[type="email"], input[type="password"], textarea, select {
+      width: 100%; background: var(--surface-raised); border: 1px solid var(--border);
+      color: var(--text); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13.5px;
+      outline: none; transition: border-color .15s var(--ease); font-family: inherit;
+    }
+    input:focus, textarea:focus, select:focus { border-color: var(--blue); }
+    input::placeholder, textarea::placeholder { color: var(--muted); }
+    textarea { resize: vertical; min-height: 120px; }
+
+    /* ---------- Buttons ---------- */
+    .btn {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 9px 16px; border-radius: var(--radius-sm); font-size: 13.5px; font-weight: 600;
+      cursor: pointer; border: 1px solid transparent; transition: background .15s var(--ease), transform .12s var(--ease), box-shadow .15s var(--ease), border-color .15s var(--ease);
+      font-family: inherit; line-height: 1.2; white-space: nowrap;
+    }
+    .btn i { width: 15px; height: 15px; flex-shrink: 0; }
+    .btn:active { transform: translateY(0) scale(.98); }
+    .btn:hover { transform: translateY(-1px); }
+    .btn-primary { background: var(--blue); color: #fff; }
+    .btn-primary:hover { background: var(--blue-hover); box-shadow: var(--shadow-sm); }
+    .btn-success { background: var(--success); color: #06210f; }
+    .btn-success:hover { filter: brightness(1.08); box-shadow: var(--shadow-sm); }
+    .btn-danger  { background: transparent; color: var(--danger); border-color: var(--border); }
+    .btn-danger:hover { background: var(--danger-tint); border-color: var(--danger); }
+    .btn-outline { background: transparent; color: var(--text); border-color: var(--border); }
+    .btn-outline:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+    .btn-sm { padding: 6px 12px; font-size: 12.5px; }
+    .btn-sm i { width: 13px; height: 13px; }
+    .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+
+    .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; gap: 12px; flex-wrap: wrap; }
+    .section-header h2 { font-size: 22px; font-weight: 600; letter-spacing: -.01em; display: flex; align-items: center; gap: 10px; }
+    .section-header h2 i { width: 20px; height: 20px; color: var(--blue); }
+
+    /* ---------- Charts ---------- */
+    .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+    @media (max-width: 900px) { .charts-grid { grid-template-columns: 1fr; } }
+    .chart-wrap { position: relative; height: 220px; }
+
+    /* ---------- Toast ---------- */
+    #toast-container { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 10px; z-index: 9999; max-width: 360px; }
+    .toast {
+      background: var(--surface-raised); border: 1px solid var(--border); color: var(--text);
+      padding: 12px 14px; border-radius: var(--radius-sm); font-size: 13px; min-width: 220px;
+      animation: slideIn .2s var(--ease); box-shadow: var(--shadow-lg);
+      display: flex; align-items: flex-start; gap: 10px; border-left: 3px solid var(--border-strong);
+    }
+    .toast i { width: 16px; height: 16px; flex-shrink: 0; margin-top: 1px; }
+    .toast.success { border-left-color: var(--success); } .toast.success i { color: var(--success); }
+    .toast.error   { border-left-color: var(--danger); }  .toast.error i   { color: var(--danger); }
+    .toast.info    { border-left-color: var(--blue); }    .toast.info i    { color: var(--blue); }
+    .toast.warning { border-left-color: var(--warn); }    .toast.warning i { color: var(--warn); }
+    .toast .msg { white-space: pre-line; }
+    @keyframes slideIn { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+
+    /* ---------- Modal ---------- */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(3,7,18,.6); z-index: 999;
+      align-items: center; justify-content: center; padding: 20px; backdrop-filter: blur(2px);
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface-raised); border-radius: var(--radius); padding: 28px;
+      width: min(600px, 95vw); max-height: 90vh; overflow-y: auto;
+      border: 1px solid var(--border); box-shadow: var(--shadow-lg);
+    }
+    .modal-title { font-size: 17px; font-weight: 600; margin-bottom: 20px; display: flex; align-items: center; gap: 9px; }
+    .modal-title i { width: 18px; height: 18px; color: var(--blue); }
+
+    /* ---------- Tabs ---------- */
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+    .tab { padding: 8px 4px; margin-right: 18px; font-size: 13.5px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); display: flex; align-items: center; gap: 6px; transition: color .15s var(--ease); }
+    .tab i { width: 14px; height: 14px; }
+    .tab.active { border-color: var(--blue); color: var(--text); font-weight: 600; }
+
+    /* ---------- Empty states ---------- */
+    .empty-state {
+      text-align: center; padding: 56px 24px; display: flex; flex-direction: column; align-items: center; gap: 6px;
+    }
+    .empty-state .icon-wrap {
+      width: 56px; height: 56px; border-radius: 14px; background: var(--surface-hover); color: var(--muted);
+      display: flex; align-items: center; justify-content: center; margin-bottom: 10px;
+    }
+    .empty-state .icon-wrap i { width: 26px; height: 26px; }
+    .empty-state h3 { font-size: 16px; font-weight: 600; }
+    .empty-state p { font-size: 13.5px; color: var(--text-secondary); max-width: 360px; margin-bottom: 6px; }
+    .empty-state .btn { margin-top: 10px; }
+    .empty { text-align: center; color: var(--muted); padding: 48px; font-size: .9rem; }
+
+    /* ---------- Misc ---------- */
+    .loading { opacity: .5; pointer-events: none; }
+    #api-key-banner {
+      background: var(--warn); color: #1a1200; padding: 10px 16px; font-size: .85rem;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    }
+    .pill-blue { background: var(--blue-tint); color: var(--blue); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; font-weight: 600; }
+    .flex-gap { display: flex; gap: 10px; flex-wrap: wrap; }
+    .mt-4 { margin-top: 16px; }
+    .progress-bar { background: var(--surface-hover); border-radius: 999px; height: 6px; overflow: hidden; margin-top: 6px; }
+    .progress-fill { height: 100%; border-radius: 999px; background: var(--blue); transition: width .4s var(--ease); }
+    .text-right { text-align: right; }
+
+    #confirm-dialog {
+      display: none; position: fixed; inset: 0; background: rgba(3,7,18,.6); z-index: 9999;
+      align-items: center; justify-content: center; padding: 20px;
+    }
+    #confirm-dialog.open { display: flex; }
+    #confirm-box {
+      background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: var(--shadow-lg); padding: 24px; width: min(420px, 95vw);
+    }
+    #confirm-box .confirm-icon {
+      width: 40px; height: 40px; border-radius: 10px; background: var(--warn-tint); color: var(--warn);
+      display: flex; align-items: center; justify-content: center; margin-bottom: 14px;
+    }
+    #confirm-box .confirm-icon i { width: 20px; height: 20px; }
+    #confirm-msg { font-size: 13.5px; line-height: 1.6; white-space: pre-line; margin-bottom: 18px; color: var(--text); }
+
+    .ccard-rate-bar { height: 5px; background: var(--surface-hover); border-radius: 999px; overflow: hidden; margin-bottom: 14px; }
+    .ccard-rate-fill { height: 100%; border-radius: 999px; background: var(--blue); }
+    .ccard-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    /* AI Generator */
+    .ai-box { background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; }
+    .ai-box-title { font-size: 12.5px; font-weight: 700; color: var(--blue); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 18px; display: flex; align-items: center; gap: 8px; }
+    .ai-box-title i { width: 15px; height: 15px; }
+    .ai-thinking { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: .85rem; margin-bottom: 12px; }
+    .ai-thinking::before { content:''; width:16px; height:16px; border:2px solid var(--blue); border-top-color:transparent; border-radius:50%; animation: ai-spin .8s linear infinite; flex-shrink:0; display:inline-block; }
+    @keyframes ai-spin { to { transform: rotate(360deg); } }
+
+    /* Campaign cards grid (unused by default table view, kept for compatibility) */
+    .campaign-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: 20px; }
+    .campaign-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 20px 22px 18px; position: relative; overflow: hidden;
+      transition: border-color .2s var(--ease), box-shadow .2s var(--ease), transform .15s var(--ease);
+    }
+    .campaign-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); transform: translateY(-2px); }
+    .ccard-name { font-size: 1rem; font-weight: 700; color: var(--blue); cursor: pointer; margin-bottom: 3px; display:block; }
+    .ccard-name:hover { text-decoration: underline; }
+    .ccard-subject { font-size: .78rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 14px; }
+    .ccard-stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+    .ccard-stat { background: var(--surface-hover); border-radius: 8px; padding: 10px 6px; text-align: center; }
+    .ccard-stat-val { font-size: 1.35rem; font-weight: 700; line-height: 1; }
+    .ccard-stat-lbl { font-size: .64rem; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-top: 3px; }
+
+    .template-card {
+      background: var(--surface-raised); border: 2px solid var(--border); border-radius: var(--radius-sm);
+      padding: 14px 10px; cursor: pointer; text-align: center; font-size: 12.5px; font-weight: 500; color: var(--text);
+      transition: border-color .15s var(--ease), background .15s var(--ease);
+      display: flex; flex-direction: column; align-items: center; gap: 6px;
+    }
+    .template-card i { width: 20px; height: 20px; color: var(--text-secondary); }
+    .template-card.selected { border-color: var(--blue); background: var(--blue-tint); }
+    .template-card.selected i { color: var(--blue); }
+
+    .step-badge {
+      background: var(--blue); color: #fff; border-radius: 50%; width: 26px; height: 26px;
+      display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; flex-shrink: 0;
+    }
+    .step-badge.done { background: var(--success); color: #06210f; }
+
+    /* ---------- Responsive ---------- */
+    @media (max-width: 900px) {
+      .sidebar { position: fixed; left: 0; top: 0; transform: translateX(-100%); box-shadow: var(--shadow-lg); }
+      .sidebar.open { transform: translateX(0); }
+      .sidebar-backdrop.open { display: block; }
+      .topbar-menu-btn { display: flex; }
+      .topbar-search { display: none; }
+      .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+      .kpi-card .value { font-size: 28px; }
+    }
+    @media (max-width: 560px) {
+      .page-title { font-size: 24px; }
+      .profile-name, .profile-role { display: none; }
+      .env-pill { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Login Overlay – shown when not authenticated -->
+<div id="login-overlay" style="position:fixed;inset:0;background:radial-gradient(circle at 50% 0%, #111c33 0%, var(--bg) 60%);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:40px 36px;width:min(420px,95vw);box-shadow:var(--shadow-lg)">
+    <div style="text-align:center;margin-bottom:28px">
+      <div style="width:52px;height:52px;border-radius:12px;background:var(--blue-tint);color:var(--blue);display:flex;align-items:center;justify-content:center;margin:0 auto 14px"><i data-lucide="shield-check" style="width:26px;height:26px"></i></div>
+      <div style="font-size:1.4rem;font-weight:700;letter-spacing:-.01em">PhishDash</div>
+      <div style="font-size:.82rem;color:var(--muted);margin-top:4px">Phishing awareness platform</div>
+    </div>
+    <div id="login-error" style="color:var(--danger);font-size:.82rem;margin-bottom:12px;display:none;padding:8px 12px;background:var(--danger-tint);border-radius:var(--radius-sm)"></div>
+    <div id="clerk-sign-in"></div>
+  </div>
+</div>
+
+<!-- Top Bar – shown after login -->
+<div class="shell">
+  <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="toggleSidebar(false)"></div>
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-mark"><i data-lucide="shield-check"></i></div>
+      <div>
+        <div class="brand-name">PhishDash</div>
+        <div class="brand-sub">Security awareness</div>
+      </div>
+    </div>
+    <div class="sidebar-body">
+      <div id="sidebar-role"></div>
+
+      <div class="nav-group">
+        <div class="nav-group-label">Overview</div>
+        <div class="nav-item active" data-page="dashboard" onclick="navigate('dashboard')" role="button" tabindex="0"><i data-lucide="layout-dashboard"></i>Dashboard</div>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-label">Campaigns</div>
+        <div class="nav-item" data-page="campaigns" onclick="navigate('campaigns')" role="button" tabindex="0"><i data-lucide="target"></i>Campaigns</div>
+        <div class="nav-item" data-page="new-campaign" onclick="navigate('new-campaign')" role="button" tabindex="0"><i data-lucide="square-plus"></i>New campaign</div>
+        <div class="nav-item" data-page="recipients" onclick="navigate('recipients')" role="button" tabindex="0"><i data-lucide="users-round"></i>Recipients</div>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-label">Analytics</div>
+        <div class="nav-item" data-page="reports" onclick="navigate('reports')" role="button" tabindex="0"><i data-lucide="file-down"></i>Reports</div>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-label">Administration</div>
+        <div class="nav-item" data-page="settings" onclick="navigate('settings')" role="button" tabindex="0"><i data-lucide="settings"></i>Settings</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Right column: topbar + main -->
+  <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+    <div class="topbar" id="user-topbar">
+      <button class="topbar-menu-btn" onclick="toggleSidebar()" aria-label="Toggle navigation"><i data-lucide="menu"></i></button>
+      <div class="topbar-search">
+        <i data-lucide="search"></i>
+        <input type="text" id="global-search" placeholder="Search this page…" oninput="applyGlobalSearch(this.value)" />
+      </div>
+      <div class="topbar-right">
+        <span class="env-pill" id="env-pill"></span>
+        <div class="dropdown-wrap">
+          <button class="icon-btn" onclick="toggleDropdown('notif-panel')" aria-label="Notifications">
+            <i data-lucide="bell"></i>
+          </button>
+          <div class="dropdown-panel" id="notif-panel">
+            <div class="dropdown-header"><div class="name">Notifications</div></div>
+            <div class="dropdown-empty"><i data-lucide="check-circle-2" style="width:22px;height:22px;display:block;margin:0 auto 8px;color:var(--muted)"></i>You're all caught up</div>
+          </div>
+        </div>
+        <div class="dropdown-wrap">
+          <button class="profile-trigger" onclick="toggleDropdown('profile-panel')">
+            <span class="avatar" id="topbar-avatar"></span>
+            <span>
+              <span class="profile-name" id="topbar-username" style="display:block"></span>
+              <span class="profile-role" id="topbar-role-text" style="display:block"></span>
+            </span>
+            <i data-lucide="chevron-down" class="chev"></i>
+          </button>
+          <div class="dropdown-panel" id="profile-panel" style="right:0">
+            <div class="dropdown-header">
+              <div class="name" id="profile-panel-username"></div>
+              <div class="meta" id="profile-panel-role"></div>
+              <div class="meta" id="profile-panel-session"></div>
+            </div>
+            <div class="dropdown-item" onclick="doLogout()"><i data-lucide="log-out"></i>Log out</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main -->
+    <main class="main" id="main-content"></main>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- New-Campaign Modal -->
+<div class="modal-overlay" id="campaign-modal">
+  <div class="modal" style="max-width:680px;width:95vw">
+    <div class="modal-title" id="modal-title"><i data-lucide="mail-plus"></i>Create new campaign</div>
+    <form id="campaign-form" onsubmit="submitCampaign(event)">
+
+      <!-- Step 1: Basic Info -->
+      <div class="form-group">
+        <label>Campaign name *</label>
+        <input type="text" id="f-name" required placeholder="e.g. Q2 Security Awareness Test" />
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="form-group">
+          <label>Email subject *</label>
+          <input type="text" id="f-subject" required placeholder="e.g. Action Required: Verify your account" />
+        </div>
+        <div class="form-group">
+          <label>Sender name</label>
+          <input type="text" id="f-sender" value="IT Security Team" />
+        </div>
+      </div>
+
+      <!-- Builder / AI mode switcher -->
+      <div class="tabs" id="campaign-mode-tabs" style="margin-bottom:16px">
+        <div class="tab active" onclick="switchCampaignMode('builder')" role="button" tabindex="0"><i data-lucide="layout-template"></i>Template builder</div>
+        <div class="tab" onclick="switchCampaignMode('ai')" role="button" tabindex="0"><i data-lucide="sparkles"></i>AI generate (Gemini)</div>
+      </div>
+
+      <!-- ── Builder Mode ────────────────────────────────────────────────── -->
+      <div id="builder-mode">
+
+      <!-- Step 2: Template Picker -->
+      <div class="form-group">
+        <label style="display:flex;align-items:center;gap:6px"><i data-lucide="layout-template" style="width:14px;height:14px"></i>Pick a template (or start from scratch)</label>
+        <div id="template-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:6px"></div>
+      </div>
+
+      <!-- Step 3: Visual Builder (Simple Fields) -->
+      <div id="visual-builder" style="background:var(--surface-raised);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px">
+        <div style="font-size:.78rem;color:var(--muted);margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:6px"><i data-lucide="pencil" style="width:12px;height:12px"></i>Customize email content — no HTML needed</div>
+        <div class="form-group">
+          <label>Greeting line <span style="color:var(--muted);font-size:.75rem">— use <code style="background:var(--surface);padding:1px 5px;border-radius:4px">{{first_name}}</code> for first name, <code style="background:var(--surface);padding:1px 5px;border-radius:4px">{{greeting}}</code> for IST time greeting (Good Morning/Afternoon/Evening)</span></label>
+          <input type="text" id="b-greeting" placeholder="{{greeting}}, {{first_name}}," value="{{greeting}}, {{first_name}}," />
+        </div>
+        <div class="form-group">
+          <label>Main message</label>
+          <textarea id="b-message" rows="3" placeholder="We have noticed unusual activity on your account. Please verify your details immediately.">We have noticed unusual activity on your account. Please verify your details immediately.</textarea>
+        </div>
+        <div class="form-group">
+          <label>Button text <span style="color:var(--muted);font-size:.75rem">(leave blank to hide button)</span></label>
+          <input type="text" id="b-btntext" placeholder="e.g. Verify My Account" value="Verify My Account" />
+        </div>
+        <div class="form-group">
+          <label>Button link URL <span style="color:var(--muted);font-size:.75rem">(the link the button points to)</span></label>
+          <input type="text" id="b-btnurl" placeholder="https://example.com/verify" value="https://login.microsoftonline.com" />
+        </div>
+        <div class="form-group">
+          <label>Button alignment</label>
+          <select id="b-btnalign" style="width:auto;min-width:140px">
+            <option value="center" selected>Center</option>
+            <option value="left">Left</option>
+            <option value="right">Right</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Footer / signature</label>
+          <input type="text" id="b-footer" placeholder="e.g. IT Security Team, Provana" value="IT Security Team | Provana" />
+        </div>
+
+        <!-- ── Image & Logo Section ──────────────────────────────────────────── -->
+        <div style="border-top:1px solid var(--border);margin:16px 0 12px;padding-top:14px">
+          <div style="font-size:.75rem;color:var(--blue);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px;font-weight:600;display:flex;align-items:center;gap:6px"><i data-lucide="image" style="width:13px;height:13px"></i>Custom image &amp; logo (optional)</div>
+
+          <!-- Feature Image -->
+          <div class="form-group">
+            <label>Feature image <span style="color:var(--muted);font-size:.75rem">— full-width image in email body (upload file or paste URL)</span></label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="text" id="b-imgurl" placeholder="Paste image URL or click Upload →" style="flex:1;min-width:180px" oninput="updateImagePreview()" />
+              <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;white-space:nowrap"><i data-lucide="upload"></i>Upload
+                <input type="file" id="b-imgfile" accept="image/*" style="display:none" onchange="handleImageUpload(this,'b-imgurl','b-imgpreview','b-imgpreview-img')" />
+              </label>
+              <button type="button" class="btn btn-outline btn-sm" onclick="clearImage()" title="Clear image"><i data-lucide="x"></i></button>
+            </div>
+            <div id="b-imgpreview" style="margin-top:8px;display:none">
+              <img id="b-imgpreview-img" style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border);object-fit:contain;display:block" alt="preview" />
+              <div style="font-size:.72rem;color:var(--success);margin-top:4px;display:flex;align-items:center;gap:5px"><i data-lucide="check" style="width:12px;height:12px"></i>Image ready — will appear full-width in email body</div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Image caption / alt text <span style="color:var(--muted);font-size:.75rem">(optional)</span></label>
+            <input type="text" id="b-imgalt" placeholder="e.g. Happy Eid Mubarak from Provana" />
+          </div>
+
+          <!-- Company Logo -->
+          <div class="form-group">
+            <label>Company logo <span style="color:var(--muted);font-size:.75rem">— small logo in the email footer signature</span></label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="text" id="b-logourl" placeholder="Paste logo URL or click Upload →" style="flex:1;min-width:180px" oninput="updateLogoPreview()" />
+              <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;white-space:nowrap"><i data-lucide="upload"></i>Upload
+                <input type="file" id="b-logofile" accept="image/*" style="display:none" onchange="handleImageUpload(this,'b-logourl','b-logopreview','b-logopreview-img')" />
+              </label>
+              <button type="button" class="btn btn-outline btn-sm" onclick="clearLogo()" title="Clear logo"><i data-lucide="x"></i></button>
+            </div>
+            <div id="b-logopreview" style="margin-top:8px;display:none">
+              <img id="b-logopreview-img" style="max-height:40px;border-radius:4px;border:1px solid var(--border)" alt="logo preview" />
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:10px;align-items:center;margin-top:4px">
+          <button type="button" class="btn btn-outline btn-sm" onclick="previewEmail()"><i data-lucide="eye"></i>Preview email</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="toggleHtmlEditor()"><i data-lucide="code"></i>Advanced: edit raw HTML</button>
+        </div>
+      </div>
+
+      <!-- Email Preview Panel -->
+      <div id="email-preview-panel" style="display:none;margin-bottom:16px">
+        <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:6px"><i data-lucide="mail-open" style="width:12px;height:12px"></i>Email preview</div>
+        <iframe id="email-preview-frame"
+          sandbox="allow-same-origin"
+          style="width:100%;min-height:480px;height:480px;border:1px solid var(--border);border-radius:8px;background:#fff;display:block"
+          onload="autoResizePreviewIframe(this)"
+        ></iframe>
+        <button type="button" class="btn btn-outline btn-sm" style="margin-top:8px" onclick="document.getElementById('email-preview-panel').style.display='none'"><i data-lucide="x"></i>Close preview</button>
+      </div>
+
+      <!-- Advanced HTML Editor (hidden by default) -->
+      <div id="html-editor-section" style="display:none;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <label style="margin:0;display:flex;align-items:center;gap:6px"><i data-lucide="code" style="width:13px;height:13px"></i>Raw HTML body <span style="color:var(--muted);font-size:.75rem">— for advanced users only</span></label>
+          <button type="button" class="btn btn-outline btn-sm" onclick="syncHtmlToBuilder()"><i data-lucide="arrow-up"></i>Sync back to builder</button>
+        </div>
+        <textarea id="f-body" rows="10" placeholder="<p>Dear {{name}},</p>..."></textarea>
+      </div>
+
+      </div><!-- end #builder-mode -->
+
+      <!-- ── AI Mode ─────────────────────────────────────────────────────── -->
+      <div id="ai-mode" style="display:none">
+        <div class="ai-box">
+          <div class="ai-box-title"><i data-lucide="sparkles"></i>Powered by Google Gemini AI</div>
+
+          <div class="form-group">
+            <label>What should this email be about? * <span style="color:var(--muted);font-size:.74rem">— describe the scenario or context</span></label>
+            <textarea id="ai-prompt" rows="3" placeholder="e.g. A phishing simulation email pretending to be an IT Security alert about suspicious login activity, asking users to verify their account within 24 hours."></textarea>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="form-group">
+              <label>Email type</label>
+              <select id="ai-type">
+                <option value="security_alert">Security alert</option>
+                <option value="hr">HR / Policy</option>
+                <option value="it">IT support</option>
+                <option value="finance">Finance / Invoice</option>
+                <option value="celebration">Festive greeting</option>
+                <option value="onboarding">Onboarding</option>
+                <option value="custom">Custom</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Tone</label>
+              <select id="ai-tone">
+                <option value="urgent">Urgent &amp; alarming</option>
+                <option value="professional">Professional &amp; formal</option>
+                <option value="friendly">Friendly &amp; warm</option>
+                <option value="corporate">Corporate &amp; direct</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Additional constraints <span style="color:var(--muted);font-size:.74rem">(optional)</span></label>
+            <input type="text" id="ai-constraints" placeholder="e.g. Keep it under 80 words, mention Microsoft 365, add a 48-hour deadline" />
+          </div>
+
+          <div id="ai-status"></div>
+          <button type="button" class="btn btn-primary" onclick="generateWithAI()" id="ai-generate-btn" style="width:100%;justify-content:center;padding:12px"><i data-lucide="sparkles"></i>Generate email with Gemini AI</button>
+        </div>
+      </div><!-- end #ai-mode -->
+
+      <!-- Hidden actual HTML field used for submission -->
+      <input type="hidden" id="f-body-final" />
+
+      <div class="flex-gap text-right">
+        <button type="button" class="btn btn-outline" onclick="closeModal('campaign-modal')">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="campaign-submit-btn"><i data-lucide="check"></i>Create campaign</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Add Recipients Modal -->
+<div class="modal-overlay" id="recipients-modal">
+  <div class="modal">
+    <div class="modal-title"><i data-lucide="users-round"></i>Add recipients</div>
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('tab-single')" role="button" tabindex="0">Single email</div>
+      <div class="tab" onclick="switchTab('tab-bulk')" role="button" tabindex="0">Bulk (paste)</div>
+      <div class="tab" onclick="switchTab('tab-excel')" role="button" tabindex="0">Excel upload</div>
+    </div>
+
+    <!-- Single -->
+    <div id="tab-single">
+      <div class="form-group">
+        <label>Email *</label>
+        <input type="email" id="r-email" placeholder="john.doe@example.com" />
+      </div>
+      <div class="form-group">
+        <label>Name</label>
+        <input type="text" id="r-name" placeholder="John Doe" />
+      </div>
+    </div>
+
+    <!-- Bulk -->
+    <div id="tab-bulk" style="display:none">
+      <div class="form-group">
+        <label>Paste emails – one per line or comma-separated (optionally <code>Name &lt;email&gt;</code>)</label>
+        <textarea id="r-bulk" rows="8" placeholder="alice@example.com&#10;Bob jones &lt;bob@example.com&gt;&#10;charlie@example.com"></textarea>
+      </div>
+    </div>
+
+    <!-- Excel -->
+    <div id="tab-excel" style="display:none">
+      <div class="form-group">
+        <label>Upload .xlsx / .csv (must have columns <code>email</code> and optionally <code>name</code>)</label>
+        <input type="file" id="r-file" accept=".xlsx,.xls,.csv" style="background:none;border:none;padding:0;color:var(--text)" onchange="previewExcel()" />
+      </div>
+      <div id="excel-preview"></div>
+    </div>
+
+    <div class="flex-gap mt-4 text-right">
+      <button type="button" class="btn btn-outline" onclick="closeModal('recipients-modal')">Cancel</button>
+      <button type="button" class="btn btn-success" onclick="submitRecipients()"><i data-lucide="plus"></i>Add recipients</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Dialog -->
+<div id="confirm-dialog">
+  <div id="confirm-box">
+    <div class="confirm-icon"><i data-lucide="triangle-alert"></i></div>
+    <p id="confirm-msg">Are you sure?</p>
+    <div class="flex-gap text-right">
+      <button class="btn btn-outline btn-sm" onclick="closeConfirm(false)">Cancel</button>
+      <button class="btn btn-success btn-sm" onclick="closeConfirm(true)"><i data-lucide="check"></i>Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ===========================================================================
+// State & Config
+// ===========================================================================
+let API_BASE = window.location.origin + '/api';
+let SESSION_TOKEN    = localStorage.getItem('phish_session_token') || '';
+let CURRENT_ROLE     = localStorage.getItem('phish_role')          || null;
+let CURRENT_USERNAME = localStorage.getItem('phish_username')      || '';
+let SESSION_STARTED_AT = null;
+let currentPage = 'dashboard';
+let selectedCampaignId = null;
+let excelRecipients = [];
+let activeTab = 'tab-single';
+let confirmResolve = null;
+let barChart = null;
+let pieChart = null;
+let currentTemplateStyle = { headerBg:'#4f46e5', headerEmoji:'', headerTitle:'', headerTitleColor:'#ffffff' };
+
+function headers() {
+  return { 'Content-Type': 'application/json', 'X-Admin-Key': SESSION_TOKEN };
+}
+
+// ===========================================================================
+// Icons – re-render Lucide icons whenever the DOM changes (innerHTML swaps
+// happen throughout this app instead of a virtual DOM, so a MutationObserver
+// is the simplest way to guarantee icons always render).
+// ===========================================================================
+let _iconRAF = null;
+function _scheduleIconRender() {
+  if (_iconRAF) return;
+  _iconRAF = requestAnimationFrame(() => { _iconRAF = null; if (window.lucide) lucide.createIcons(); });
+}
+new MutationObserver(_scheduleIconRender).observe(document.documentElement, { childList: true, subtree: true });
+_scheduleIconRender();
+
+// Keyboard activation for clickable divs (nav items, tabs, template cards)
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const el = e.target.closest('[role="button"]');
+  if (el) { e.preventDefault(); el.click(); }
+});
+
+// Close dropdowns when clicking outside
+document.addEventListener('click', (e) => {
+  document.querySelectorAll('.dropdown-panel.open').forEach(panel => {
+    if (!panel.parentElement.contains(e.target)) panel.classList.remove('open');
+  });
+});
+function toggleDropdown(id) {
+  const panel = document.getElementById(id);
+  const wasOpen = panel.classList.contains('open');
+  document.querySelectorAll('.dropdown-panel.open').forEach(p => p.classList.remove('open'));
+  if (!wasOpen) panel.classList.add('open');
+}
+
+// Mobile sidebar toggle
+function toggleSidebar(force) {
+  const sidebar = document.getElementById('sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  const open = force !== undefined ? force : !sidebar.classList.contains('open');
+  sidebar.classList.toggle('open', open);
+  backdrop.classList.toggle('open', open);
+}
+
+// Environment indicator – derived from the actual URL the app is served from
+(function initEnvPill() {
+  const isLocal = /^(localhost|127\.|0\.0\.0\.0|192\.168\.|10\.)/.test(window.location.hostname);
+  const el = document.getElementById('env-pill');
+  el.textContent = isLocal ? 'Development' : 'Production';
+  el.className = 'env-pill ' + (isLocal ? 'env-dev' : 'env-prod');
+})();
+
+// Lightweight client-side search: filters visible table rows on the current page
+function applyGlobalSearch(query) {
+  const q = query.trim().toLowerCase();
+  document.querySelectorAll('#main-content table tbody tr').forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? '' : 'none';
+  });
+}
+
+// ===========================================================================
+// RBAC – Role Capabilities
+// ===========================================================================
+const ROLE_CAN = {
+  admin:           {dashboard:1, view_campaigns:1, create_campaign:1, view_recipients:1, add_recipients:1, send:1, report:1},
+  operator:        {dashboard:1, view_campaigns:1, create_campaign:1, view_recipients:1, add_recipients:1, send:1, report:1},
+  auditor:         {dashboard:1, view_campaigns:1, view_recipients:1, report:1},
+  template_author: {view_campaigns:1, create_campaign:1},
+};
+const ROLE_LABELS = { admin:'Admin', operator:'Operator', auditor:'Auditor', template_author:'Template author' };
+const ROLE_ICONS  = { admin:'crown', operator:'rocket', auditor:'eye', template_author:'pencil-line' };
+const ROLE_COLORS = { admin:'#F59E0B', operator:'#3B82F6', auditor:'#22C55E', template_author:'#38BDF8' };
+
+function can(perm) { return !!(CURRENT_ROLE && ROLE_CAN[CURRENT_ROLE]?.[perm]); }
+
+function roleBadgeHtml(role) {
+  if (!role) return '';
+  const color = ROLE_COLORS[role] || 'var(--muted)';
+  return `<span style="display:inline-flex;align-items:center;gap:5px;background:${color}22;color:${color};border-radius:999px;padding:3px 11px;font-size:.72rem;font-weight:700">
+    <i data-lucide="${ROLE_ICONS[role] || 'user'}" style="width:11px;height:11px"></i>${ROLE_LABELS[role]}
+  </span>`;
+}
+
+function initials(name) {
+  const parts = String(name || '?').trim().split(/[\s._-]+/).filter(Boolean);
+  if (!parts.length) return '?';
+  return (parts[0][0] + (parts[1]?.[0] || '')).toUpperCase();
+}
+
+function updateRoleUI() {
+  const topbar = document.getElementById('user-topbar');
+  if (topbar) topbar.classList.toggle('visible', !!(CURRENT_ROLE && SESSION_TOKEN));
+  const usernameEl = document.getElementById('topbar-username');
+  const roleTextEl = document.getElementById('topbar-role-text');
+  const avatarEl   = document.getElementById('topbar-avatar');
+  if (usernameEl) usernameEl.textContent = CURRENT_USERNAME || '';
+  if (roleTextEl) roleTextEl.textContent = CURRENT_ROLE ? ROLE_LABELS[CURRENT_ROLE] : '';
+  if (avatarEl) avatarEl.textContent = initials(CURRENT_USERNAME);
+
+  const panelUser = document.getElementById('profile-panel-username');
+  const panelRole = document.getElementById('profile-panel-role');
+  const panelSess = document.getElementById('profile-panel-session');
+  if (panelUser) panelUser.textContent = CURRENT_USERNAME || '';
+  if (panelRole) panelRole.innerHTML = roleBadgeHtml(CURRENT_ROLE);
+  if (panelSess) panelSess.textContent = SESSION_STARTED_AT ? `Active since ${SESSION_STARTED_AT}` : '';
+
+  const roleEl = document.getElementById('sidebar-role');
+  if (roleEl) {
+    roleEl.innerHTML = CURRENT_ROLE ? `<div style="display:flex;align-items:center;gap:8px"><span class="avatar" style="width:24px;height:24px;font-size:10px">${esc(initials(CURRENT_USERNAME))}</span><div><div style="font-size:12.5px;font-weight:600;color:var(--text)">${esc(CURRENT_USERNAME)}</div><div style="font-size:11px;color:var(--muted)">${ROLE_LABELS[CURRENT_ROLE]}</div></div></div>` : '';
+    roleEl.style.display = CURRENT_ROLE ? 'block' : 'none';
+  }
+  document.querySelectorAll('.nav-item[data-page]').forEach(el => {
+    const p = el.dataset.page;
+    let show = true;
+    if (p === 'dashboard')    show = can('dashboard');
+    if (p === 'campaigns')    show = can('view_campaigns');
+    if (p === 'new-campaign') show = can('create_campaign');
+    if (p === 'recipients')   show = can('view_recipients') || can('add_recipients');
+    if (p === 'reports')      show = can('report');
+    el.style.display = show ? '' : 'none';
+  });
+}
+
+function _istGreetingSample() {
+  const h = new Date().getHours();
+  if (h >= 5  && h < 12) return 'Good Morning';
+  if (h >= 12 && h < 17) return 'Good Afternoon';
+  if (h >= 17 && h < 21) return 'Good Evening';
+  return 'Good Night';
+}
+
+// ===========================================================================
+// Toast
+// ===========================================================================
+const TOAST_ICONS = { success: 'circle-check', error: 'circle-x', info: 'info', warning: 'triangle-alert' };
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<i data-lucide="${TOAST_ICONS[type] || 'info'}"></i><span class="msg"></span>`;
+  el.querySelector('.msg').textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// ===========================================================================
+// Authentication – Clerk
+// ===========================================================================
+// Injected server-side by app.py's admin_ui() route from config.CLERK_PUBLISHABLE_KEY.
+const CLERK_PUBLISHABLE_KEY = '__CLERK_PUBLISHABLE_KEY__';
+let _clerkSyncing = false;
+
+function _clerkErr(msg) {
+  const errEl = document.getElementById('login-error');
+  if (!errEl) return;
+  errEl.style.display = '';
+  errEl.textContent = msg;
+}
+
+// Exchanges the browser's Clerk session for a role via /api/auth/clerk/session,
+// then stores it the same way the old login flow did (SESSION_TOKEN='clerk'
+// mirrors what used to be SESSION_TOKEN='sso').
+async function syncClerkSession() {
+  if (_clerkSyncing) return;
+  _clerkSyncing = true;
+  try {
+    const res = await fetch(`${API_BASE}/auth/clerk/session`, { method: 'POST', credentials: 'include' });
+    const data = await res.json();
+    if (!res.ok) { _clerkErr(data.error || 'Sign-in failed'); return; }
+    if (!data.role) {
+      _clerkErr(`Signed in as ${data.email || data.name}, but no role is assigned yet. Ask an admin to set your role in the Clerk Dashboard (User -> Metadata -> Public: {"role": "admin"}).`);
+      return;
+    }
+    SESSION_TOKEN    = 'clerk';
+    CURRENT_ROLE     = data.role;
+    CURRENT_USERNAME = data.name || data.email;
+    SESSION_STARTED_AT = new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'});
+    localStorage.setItem('phish_session_token', 'clerk');
+    localStorage.setItem('phish_role', CURRENT_ROLE);
+    localStorage.setItem('phish_username', CURRENT_USERNAME);
+    document.getElementById('login-overlay').style.display = 'none';
+    updateRoleUI();
+    renderPage();
+  } catch (ex) {
+    _clerkErr(ex.message);
+  } finally {
+    _clerkSyncing = false;
+  }
+}
+
+function initClerkAuth() {
+  if (!CLERK_PUBLISHABLE_KEY) {
+    _clerkErr('Clerk is not configured. Set CLERK_PUBLISHABLE_KEY and CLERK_SECRET_KEY.');
+    return;
+  }
+  window.addEventListener('load', async () => {
+    if (!window.Clerk) { _clerkErr('Failed to load Clerk. Check your network connection and CLERK_PUBLISHABLE_KEY.'); return; }
+    try {
+      await Clerk.load();
+    } catch (ex) { _clerkErr(ex.message); return; }
+    if (Clerk.user) {
+      syncClerkSession();
+    } else {
+      Clerk.mountSignIn(document.getElementById('clerk-sign-in'));
+    }
+    Clerk.addListener(({ user }) => {
+      if (user && SESSION_TOKEN !== 'clerk') syncClerkSession();
+    });
+  });
+}
+
+async function doLogout() {
+  try { await fetch(`${API_BASE}/auth/clerk/logout`, { method: 'POST' }); } catch {}
+  try { if (window.Clerk) await Clerk.signOut(); } catch {}
+  SESSION_TOKEN = ''; CURRENT_ROLE = null; CURRENT_USERNAME = '';
+  localStorage.removeItem('phish_session_token');
+  localStorage.removeItem('phish_role');
+  localStorage.removeItem('phish_username');
+  document.getElementById('user-topbar').classList.remove('visible');
+  // Reload so Clerk's SignIn widget remounts cleanly for the next sign-in.
+  window.location.reload();
+}
+
+// ===========================================================================
+// Navigation
+// ===========================================================================
+function navigate(page, campaignId) {
+  currentPage = page;
+  if (campaignId) selectedCampaignId = campaignId;
+  // Stop detail auto-refresh timer when leaving campaign-detail page
+  if (page !== 'campaign-detail' && _detailRefreshTimer) {
+    clearInterval(_detailRefreshTimer); _detailRefreshTimer = null;
+    window.__refreshCampaignDetail = null;
+  }
+  // Stop campaign auto-refresh timer when leaving campaigns page
+  if (page !== 'campaigns' && _campaignRefreshTimer) {
+    clearInterval(_campaignRefreshTimer); _campaignRefreshTimer = null;
+  }
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
+  toggleSidebar(false);
+  const searchEl = document.getElementById('global-search');
+  if (searchEl) searchEl.value = '';
+  renderPage();
+}
+
+function renderPage() {
+  const el = document.getElementById('main-content');
+  el.innerHTML = '<div class="empty">Loading…</div>';
+  switch (currentPage) {
+    case 'dashboard':       return renderDashboard();
+    case 'campaigns':       return renderCampaigns();
+    case 'new-campaign':    return renderNewCampaign();
+    case 'recipients':      return renderRecipientsPage();
+    case 'reports':         return renderReports();
+    case 'campaign-detail': return renderCampaignDetail(selectedCampaignId);
+    case 'settings':         return renderSettings();
+  }
+}
+
+// ===========================================================================
+// Dashboard
+// ===========================================================================
+function trendHtml(current, previous, higherIsBetter = true) {
+  if (previous === null || previous === undefined || previous === 0) {
+    return `<span class="kpi-desc">No prior campaign to compare</span>`;
+  }
+  const diff = current - previous;
+  const pct = Math.round((diff / previous) * 100);
+  if (pct === 0) return `<div class="kpi-trend flat"><i data-lucide="minus"></i>Flat vs last campaign</div>`;
+  const isUp = pct > 0;
+  const good = higherIsBetter ? isUp : !isUp;
+  return `<div class="kpi-trend ${good ? 'up' : 'down'}"><i data-lucide="${isUp ? 'trending-up' : 'trending-down'}"></i>${isUp ? '+' : ''}${pct}% vs last campaign</div>`;
+}
+
+function kpiCard({ icon, color, value, label, extra = '' }) {
+  return `<div class="kpi-card">
+    <div class="kpi-top">
+      <div class="kpi-icon" style="background:${color}1f;color:${color}"><i data-lucide="${icon}"></i></div>
+    </div>
+    <div class="value">${value}</div>
+    <div class="label">${label}</div>
+    ${extra}
+  </div>`;
+}
+
+async function renderDashboard() {
+  const main = document.getElementById('main-content');
+  try {
+    const res = await fetch(`${API_BASE}/phish/dashboard`, { headers: headers() });
+    if (res.status === 401) { _handleUnauthorized(401); return; }
+    if (res.status === 403) { main.innerHTML = unauthorizedHtml(403); return; }
+    const data = await res.json();
+
+    const totalCampaigns = data.length;
+    const totalSent  = data.reduce((s, c) => s + (c.sent || 0), 0);
+    const totalOpen  = data.reduce((s, c) => s + (c.opened || 0), 0);
+    const totalDups  = data.reduce((s, c) => s + (c.total_duplicates || 0), 0);
+    const avgRate    = totalSent ? ((totalOpen / totalSent) * 100).toFixed(1) : 0;
+
+    // Destroy old charts
+    if (barChart) { barChart.destroy(); barChart = null; }
+    if (pieChart) { pieChart.destroy(); pieChart = null; }
+
+    if (!data.length) {
+      main.innerHTML = `
+        <div class="page-header"><div><div class="page-title"><i data-lucide="layout-dashboard"></i>Dashboard</div><div class="page-subtitle">Security awareness at a glance</div></div></div>
+        <div class="card">
+          <div class="empty-state">
+            <div class="icon-wrap"><i data-lucide="target"></i></div>
+            <h3>No campaign data available</h3>
+            <p>Create your first phishing simulation to start measuring your organization's security awareness.</p>
+            ${can('create_campaign') ? `<button class="btn btn-primary" onclick="navigate('new-campaign')"><i data-lucide="square-plus"></i>Create your first campaign</button>` : ''}
+          </div>
+        </div>`;
+      return;
+    }
+
+    // Compute a real, honest trend by comparing the two most recent campaigns
+    // (sorted by created_at if present) — never fabricated numbers.
+    const sorted = [...data].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+    const latest = sorted[0], prior = sorted[1];
+    const sentTrend = prior ? trendHtml(latest.sent || 0, prior.sent || 0) : `<span class="kpi-desc">No prior campaign to compare</span>`;
+
+    main.innerHTML = `
+      <div class="page-header">
+        <div><div class="page-title"><i data-lucide="layout-dashboard"></i>Dashboard</div><div class="page-subtitle">Security awareness at a glance</div></div>
+      </div>
+      <div class="kpi-grid">
+        ${kpiCard({ icon:'target', color:'#3B82F6', value: totalCampaigns, label:'Total campaigns', extra:`<span class="kpi-desc">Across all statuses</span>` })}
+        ${kpiCard({ icon:'send', color:'#3B82F6', value: totalSent, label:'Emails sent', extra: sentTrend })}
+        ${kpiCard({ icon:'mail-open', color:'#22C55E', value: totalOpen, label:'Emails opened', extra:`<span class="kpi-desc">${totalSent ? Math.round((totalOpen/totalSent)*100) : 0}% of all sends</span>` })}
+        ${kpiCard({ icon:'percent', color:'#F59E0B', value: avgRate + '%', label:'Avg. open rate', extra:`<span class="kpi-desc">Weighted across campaigns</span>` })}
+        ${kpiCard({ icon:'copy', color:'#A78BFA', value: totalDups, label:'Duplicate sends', extra:`<span class="kpi-desc">Same recipient sent twice+</span>` })}
+      </div>
+      <div class="charts-grid">
+        <div class="card">
+          <div class="card-header-row">
+            <div class="titles"><h3>Sent vs. opened</h3><div class="sub">Per campaign comparison</div></div>
+            <div class="card-tools">
+              <button class="icon-btn" title="Export chart as image" onclick="exportChartImage(barChart,'sent-vs-opened')"><i data-lucide="download"></i></button>
+              <button class="icon-btn" title="Refresh" onclick="renderDashboard()"><i data-lucide="refresh-cw"></i></button>
+            </div>
+          </div>
+          <div class="chart-wrap"><canvas id="bar-chart"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-header-row">
+            <div class="titles"><h3>Open distribution</h3><div class="sub">Overall, all campaigns</div></div>
+            <div class="card-tools">
+              <button class="icon-btn" title="Export chart as image" onclick="exportChartImage(pieChart,'open-distribution')"><i data-lucide="download"></i></button>
+              <button class="icon-btn" title="Refresh" onclick="renderDashboard()"><i data-lucide="refresh-cw"></i></button>
+            </div>
+          </div>
+          <div class="chart-wrap"><canvas id="pie-chart"></canvas></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="section-header"><h2><i data-lucide="list"></i>All campaigns</h2></div>
+        ${campaignTable(data, true)}
+      </div>`;
+
+    const labels = data.map(c => c.name || c.campaign_id);
+    const sentVals = data.map(c => c.sent || 0);
+    const openVals = data.map(c => c.opened || 0);
+
+    barChart = new Chart(document.getElementById('bar-chart').getContext('2d'), {
+      type: 'bar',
+      data: { labels, datasets: [
+        { label: 'Sent',   data: sentVals, backgroundColor: '#3B82F6', borderRadius: 4 },
+        { label: 'Opened', data: openVals, backgroundColor: '#22C55E', borderRadius: 4 },
+      ]},
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#94A3B8' } } }, scales: { x: { ticks: { color: '#64748B' }, grid: { display:false } }, y: { ticks: { color: '#64748B' }, grid: { color: 'rgba(255,255,255,.06)' } } } }
+    });
+
+    const notOpened = totalSent - totalOpen;
+    pieChart = new Chart(document.getElementById('pie-chart').getContext('2d'), {
+      type: 'doughnut',
+      data: { labels: ['Opened', 'Not opened'], datasets: [{ data: [totalOpen, notOpened], backgroundColor: ['#22C55E', '#1F2937'] }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#94A3B8' } } } }
+    });
+  } catch (e) { main.innerHTML = `<div class="empty">Error loading dashboard: ${e.message}</div>`; }
+}
+
+function exportChartImage(chart, name) {
+  if (!chart) return;
+  const a = document.createElement('a');
+  a.href = chart.toBase64Image();
+  a.download = `${name}.png`;
+  a.click();
+}
+
+function campaignTable(data, withActions = false) {
+  if (!data.length) return `<div class="empty-state"><div class="icon-wrap"><i data-lucide="target"></i></div><h3>No campaigns yet</h3><p>Create your first phishing simulation to see it listed here.</p>${can('create_campaign') ? `<button class="btn btn-primary" onclick="openModal('campaign-modal')"><i data-lucide="square-plus"></i>New campaign</button>` : ''}</div>`;
+  return `<div class="table-scroll"><table>
+    <thead><tr>
+      <th>Name</th><th>Subject</th><th>Status</th>
+      <th>Total</th><th>Sent</th><th>Opened</th><th>Clicked</th><th>Failed</th><th>Duplicates</th><th>Open rate</th>
+      ${withActions ? '<th>Actions</th>' : ''}
+    </tr></thead><tbody>
+    ${data.map(c => { const cId = c.id || c.campaign_id || c.RowKey || ''; const cSent = c.sent ?? c.total_sent ?? 0; const cOpened = c.opened ?? c.total_opened ?? 0; const cClicked = c.total_clicked ?? 0; const cTotal = c.total ?? (cSent + cOpened) ?? 0; const cRate = c.open_rate ?? (cSent > 0 ? ((cOpened/cSent)*100).toFixed(1) : 0); return `<tr>
+      <td><a href="#" onclick="navigate('campaign-detail','${cId}')" style="color:var(--blue);font-weight:600">${esc(c.name || c.Name)}</a></td>
+      <td style="color:var(--text-secondary)">${esc(c.subject || c.Subject || '')}</td>
+      <td><span class="badge badge-${(c.status || c.Status || 'draft').toLowerCase()}">${c.status || c.Status || 'draft'}</span></td>
+      <td>${cTotal}</td>
+      <td>${cSent}</td>
+      <td>${cOpened}</td>
+      <td>${cClicked}</td>
+      <td style="color:${(c.total_failed??0)>0?'var(--danger)':'inherit'}">${c.total_failed ?? 0}</td>
+      <td style="color:${(c.total_duplicates??0)>0?'var(--purple)':'inherit'}">${c.total_duplicates ?? 0}</td>
+      <td>
+        <div>${cRate}%</div>
+        <div class="progress-bar"><div class="progress-fill" style="width:${cRate}%"></div></div>
+      </td>
+      ${withActions ? `<td><div class="flex-gap">
+        <button class="btn btn-outline btn-sm" onclick="navigate('campaign-detail','${cId}')">View</button>
+        <button class="btn btn-success btn-sm" onclick="confirmSend('${cId}')"><i data-lucide="send"></i>Send</button>
+        <button class="btn btn-outline btn-sm" onclick="downloadReport('${cId}','${esc(c.name || c.Name)}')"><i data-lucide="file-down"></i>CSV</button>
+        ${can('create_campaign') ? `<button class="btn btn-danger btn-sm" onclick="deleteCampaign('${cId}','${esc(c.name || c.Name)}')"><i data-lucide="trash-2"></i></button>` : ''}
+        ${(can('send') && (c.total_duplicates??0)>0) ? `<button class="btn btn-outline btn-sm" style="color:var(--purple)" onclick="clearDuplicates('${cId}',${c.total_duplicates??0},'campaigns')"><i data-lucide="eraser"></i>Dups (${c.total_duplicates})</button>` : ''}
+      </div></td>` : ''}
+    </tr>`; }).join('')}
+    </tbody></table></div>`;
+}
+
+// ===========================================================================
+// Campaigns List
+// ===========================================================================
+let _campaignRefreshTimer = null;
+
+async function renderCampaigns() {
+  // Clear any previous polling timer
+  if (_campaignRefreshTimer) { clearInterval(_campaignRefreshTimer); _campaignRefreshTimer = null; }
+  const main = document.getElementById('main-content');
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns`, { headers: headers() });
+    if (res.status === 401) { _handleUnauthorized(401); return; }
+    if (res.status === 403) { main.innerHTML = unauthorizedHtml(403); return; }
+    const data = await res.json();
+    const lastUpdated = new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    main.innerHTML = `
+      <div class="page-header">
+        <div><div class="page-title"><i data-lucide="target"></i>Campaigns</div><div class="page-subtitle">Manage and track phishing simulations</div></div>
+        <div class="page-header-actions">
+          <span class="live-indicator"><span class="live-dot"></span>Live · updated <span id="last-refresh-time">${lastUpdated}</span></span>
+          ${can('create_campaign') ? `<button class="btn btn-primary" onclick="openModal('campaign-modal')"><i data-lucide="square-plus"></i>New campaign</button>` : ''}
+        </div>
+      </div>
+      <div class="card">${campaignTable(data, true)}</div>`;
+    // Auto-refresh every 30 s while on this page
+    _campaignRefreshTimer = setInterval(async () => {
+      try {
+        const r2 = await fetch(`${API_BASE}/phish/campaigns`, { headers: headers() });
+        if (r2.status === 401) { clearInterval(_campaignRefreshTimer); _campaignRefreshTimer = null; _handleUnauthorized(401); return; }
+        if (!r2.ok) return;
+        const d2 = await r2.json();
+        const tableWrap = main.querySelector('.card');
+        if (tableWrap) tableWrap.innerHTML = campaignTable(d2, true);
+        const ts = document.getElementById('last-refresh-time');
+        if (ts) ts.textContent = new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      } catch (_) {}
+    }, 30000);
+  } catch (e) { main.innerHTML = `<div class="empty">Error: ${e.message}</div>`; }
+}
+
+// ===========================================================================
+// ===========================================================================
+// New Campaign – Template System & Visual Builder
+// ===========================================================================
+
+const EMAIL_TEMPLATES = [
+  {
+    id: 'password_reset',
+    label: 'Password Reset',
+    icon: 'key-round',
+    subject: 'Action Required: Reset Your Password',
+    greeting: 'Dear {{name}},',
+    message: 'Our security system has detected that your password may have been compromised. To protect your account, you must reset your password within 24 hours.',
+    btnText: 'Reset My Password',
+    btnUrl: 'https://login.microsoftonline.com',
+    footer: 'IT Security Team | Provana',
+  },
+  {
+    id: 'account_verify',
+    label: 'Account Verify',
+    icon: 'shield-check',
+    subject: 'Verify Your Account – Unusual Activity Detected',
+    greeting: 'Dear {{name}},',
+    message: 'We detected unusual sign-in activity on your account from an unrecognized device. If this was not you, please verify your identity immediately.',
+    btnText: 'Verify My Account',
+    btnUrl: 'https://login.microsoftonline.com',
+    footer: 'IT Security Team | Provana',
+  },
+  {
+    id: 'invoice',
+    label: 'Fake Invoice',
+    icon: 'receipt',
+    subject: 'Invoice #INV-2026 – Payment Required',
+    greeting: 'Dear {{name}},',
+    message: 'Please find attached Invoice #INV-2026 for $4,850.00, due within 3 business days. Click below to review and approve the payment.',
+    btnText: 'Review Invoice',
+    btnUrl: 'https://login.microsoftonline.com',
+    footer: 'Finance Department | Provana',
+  },
+  {
+    id: 'hr_update',
+    label: 'HR Policy Update',
+    icon: 'users-round',
+    subject: 'Important: Updated HR Policy – Action Needed',
+    greeting: 'Dear {{name}},',
+    message: 'HR has issued an updated Employee Policy document that requires your acknowledgment. Please review and sign the updated policy by end of this week.',
+    btnText: 'Review & Sign Policy',
+    btnUrl: 'https://login.microsoftonline.com',
+    footer: 'Human Resources | Provana',
+  },
+  {
+    id: 'it_alert',
+    label: 'IT Alert',
+    icon: 'triangle-alert',
+    subject: 'Urgent: Your Microsoft 365 License is Expiring',
+    greeting: 'Dear {{name}},',
+    message: 'Your Microsoft 365 license is scheduled to expire in 48 hours. To avoid losing access to your emails, Teams, and documents, please renew your license immediately.',
+    btnText: 'Renew License Now',
+    btnUrl: 'https://login.microsoftonline.com',
+    footer: 'IT Support | Provana',
+  },
+  {
+    id: 'blank',
+    label: 'Blank (custom)',
+    icon: 'file',
+    subject: '',
+    greeting: 'Dear {{name}},',
+    message: '',
+    btnText: '',
+    btnUrl: '',
+    footer: 'IT Security Team | Provana',
+  },
+  // ── Celebration Templates ────────────────────────────────────────────────────────────────────
+  {
+    id: 'holi',
+    label: 'Holi',
+    icon: 'party-popper',
+    subject: '🌈 Happy Holi from the Team!',
+    greeting: '{{greeting}}, {{first_name}},',
+    message: 'Wishing you and your loved ones a very Happy Holi! 🌈\n\nMay this festival of colors fill your life with joy, happiness, and beautiful moments. Let the vibrant hues of Holi paint your world with love and laughter. 🎨',
+    btnText: '',
+    btnUrl: '',
+    footer: 'With colorful wishes – Team Provana 🎉',
+    headerStyle: { headerBg:'linear-gradient(135deg,#ff6b6b 0%,#ffd93d 33%,#6bcb77 66%,#4d96ff 100%)', headerEmoji:'🎨🌈🎉', headerTitle:'Happy Holi!', headerTitleColor:'#fff' },
+  },
+  {
+    id: 'diwali',
+    label: 'Diwali',
+    icon: 'flame',
+    subject: '🪔 Happy Diwali – Festival of Lights!',
+    greeting: '{{greeting}}, {{first_name}},',
+    message: 'Wishing you a sparkling Diwali filled with warmth, light, and love! 🪔✨\n\nMay this festival of lights brighten your home and heart, and bring you joy, prosperity, and beautiful new beginnings. May every diya you light remind you of the strength within you.',
+    btnText: '',
+    btnUrl: '',
+    footer: 'With Diwali blessings – Team Provana 🪔',
+    headerStyle: { headerBg:'linear-gradient(135deg,#1a0533 0%,#5c1a8a 40%,#c8960c 100%)', headerEmoji:'🪔✨🌟', headerTitle:'Happy Diwali!', headerTitleColor:'#ffd700' },
+  },
+  {
+    id: 'womens_day',
+    label: "Women's Day",
+    icon: 'heart',
+    subject: "💜 Happy Women's Day – Celebrating You!",
+    greeting: '{{greeting}}, {{first_name}},',
+    message: "Happy International Women's Day! 🌸💜\n\nToday we celebrate and honor the incredible strength, resilience, and achievements of women everywhere. Thank you for inspiring us every single day. You make our world brighter and our team stronger!",
+    btnText: '',
+    btnUrl: '',
+    footer: "With admiration – Team Provana 💜",
+    headerStyle: { headerBg:'linear-gradient(135deg,#9b1dca 0%,#e056d0 50%,#ff9a9e 100%)', headerEmoji:'🌸💜✨', headerTitle:"Happy Women's Day!", headerTitleColor:'#fff' },
+  },
+  {
+    id: 'eid',
+    label: 'Eid Mubarak',
+    icon: 'moon-star',
+    subject: '🌙 Eid Mubarak – Warm Wishes from the Team!',
+    greeting: '{{greeting}}, {{first_name}},',
+    message: 'Eid Mubarak! 🌙✨\n\nWishing you and your family a blessed Eid filled with joy, peace, and togetherness. May this beautiful celebration bring happiness, prosperity, and wonderful memories to you and your loved ones.\n\nEnjoy this special day!',
+    btnText: '',
+    btnUrl: '',
+    footer: 'Regards,\nTeam HR | Provana',
+    imageUrl: '',  // → upload your Eid image to fill this
+    logoUrl:  '',  // → upload the Provana logo to fill this
+    imageAlt: 'Eid Mubarak',
+    headerStyle: { headerBg:'linear-gradient(135deg,#0a3d4a 0%,#1a6e8e 55%,#2ca8a8 100%)', headerEmoji:'🌙⭐✨', headerTitle:'Eid Mubarak!', headerTitleColor:'#ffd700' },
+  },
+  {
+    id: 'new_year',
+    label: 'New Year',
+    icon: 'sparkles',
+    subject: '🎆 Happy New Year – Best Wishes from the Team!',
+    greeting: '{{greeting}}, {{first_name}},',
+    message: 'Happy New Year! 🎆🎉\n\nWishing you a year filled with success, happiness, and new opportunities. May 2026 bring you and your family health, joy, and all the best things in life.\n\nHere’s to a fantastic year ahead!',
+    btnText: '',
+    btnUrl: '',
+    footer: 'Warm regards,\nTeam HR | Provana',
+    imageUrl: '',
+    logoUrl:  '',
+    imageAlt: 'Happy New Year',
+    headerStyle: { headerBg:'linear-gradient(135deg,#0d0d2b 0%,#1a237e 40%,#283593 70%,#1565c0 100%)', headerEmoji:'🎆🥂🎉', headerTitle:'Happy New Year 2026!', headerTitleColor:'#ffd700' },
+  },
+  {
+    id: 'christmas',
+    label: 'Christmas',
+    icon: 'gift',
+    subject: '🎄 Merry Christmas – Season\'s Greetings!',
+    greeting: '{{greeting}}, {{first_name}},',
+    message: 'Merry Christmas! 🎄🎅\n\nWishing you and your family a wonderful Christmas full of warmth, laughter, and cherished moments. May the magic of this festive season fill your home with joy and love.\n\nSeason\'s Greetings from all of us!',
+    btnText: '',
+    btnUrl: '',
+    footer: 'Season\'s Greetings,\nTeam HR | Provana',
+    imageUrl: '',
+    logoUrl:  '',
+    imageAlt: 'Merry Christmas',
+    headerStyle: { headerBg:'linear-gradient(135deg,#1b5e20 0%,#2e7d32 50%,#c62828 100%)', headerEmoji:'🎄🎅🎁', headerTitle:'Merry Christmas!', headerTitleColor:'#fff' },
+  },
+];
+
+function renderNewCampaign() {
+  openModal('campaign-modal');
+  navigate('campaigns');
+  renderTemplateGrid();
+  clearImage();
+  clearLogo();
+  switchCampaignMode('builder');
+  // show builder by default, hide html editor
+  document.getElementById('html-editor-section').style.display = 'none';
+  document.getElementById('email-preview-panel').style.display = 'none';
+  // clear AI status
+  const s = document.getElementById('ai-status'); if (s) s.innerHTML = '';
+}
+
+function renderTemplateGrid() {
+  const grid = document.getElementById('template-grid');
+  if (!grid) return;
+  grid.innerHTML = EMAIL_TEMPLATES.map(t => {
+    return `<div class="template-card" id="tcard-${t.id}" onclick="applyTemplate('${t.id}')" role="button" tabindex="0">
+      <i data-lucide="${t.icon || 'file'}"></i>${t.label}
+    </div>`;
+  }).join('');
+}
+
+function applyTemplate(id) {
+  const tpl = EMAIL_TEMPLATES.find(t => t.id === id);
+  if (!tpl) return;
+
+  // Highlight selected card
+  document.querySelectorAll('.template-card').forEach(c => c.classList.remove('selected'));
+  const card = document.getElementById(`tcard-${id}`);
+  if (card) card.classList.add('selected');
+
+  // Apply festive header style (default: plain blue)
+  currentTemplateStyle = tpl.headerStyle
+    ? { ...tpl.headerStyle }
+    : { headerBg:'#4f46e5', headerEmoji:'', headerTitle:'', headerTitleColor:'#ffffff' };
+
+  // Fill in fields
+  if (tpl.subject) document.getElementById('f-subject').value = tpl.subject;
+  document.getElementById('b-greeting').value = tpl.id === 'blank' ? '{{greeting}}, {{first_name}},' : (tpl.greeting || '{{greeting}}, {{first_name}},');
+  document.getElementById('b-message').value = tpl.message;
+  document.getElementById('b-btntext').value = tpl.btnText;
+  document.getElementById('b-btnurl').value = tpl.btnUrl;
+  document.getElementById('b-footer').value = tpl.footer;
+  document.getElementById('b-btnalign').value = tpl.btnAlign || 'center';
+
+  // Image & Logo — reset to template defaults (undefined = don't touch; '' = clear)
+  const imgUrlEl  = document.getElementById('b-imgurl');
+  const logoUrlEl = document.getElementById('b-logourl');
+  const imgAltEl  = document.getElementById('b-imgalt');
+  if (imgUrlEl)  { imgUrlEl.value  = tpl.imageUrl  ?? ''; updateImagePreview(); }
+  if (logoUrlEl) { logoUrlEl.value = tpl.logoUrl   ?? ''; updateLogoPreview();  }
+  if (imgAltEl)  { imgAltEl.value  = tpl.imageAlt  ?? ''; }
+
+  // Sync HTML editor if open
+  syncBuilderToHtml();
+}
+
+function buildHtmlFromFields() {
+  const greeting = document.getElementById('b-greeting').value.trim();
+  const message  = document.getElementById('b-message').value.trim().replace(/\n/g, '<br>');
+  const btnText  = document.getElementById('b-btntext').value.trim();
+  const btnUrl   = document.getElementById('b-btnurl').value.trim();
+  const footer   = document.getElementById('b-footer').value.trim().replace(/\n/g, '<br>');
+  const sender   = document.getElementById('f-sender').value.trim() || 'IT Security Team';
+  const style    = currentTemplateStyle;
+  const imgUrl   = (document.getElementById('b-imgurl')?.value  || '').trim();
+  const imgAlt   = (document.getElementById('b-imgalt')?.value  || '').trim() || 'Email Image';
+  const logoUrl  = (document.getElementById('b-logourl')?.value || '').trim();
+
+  const btnAlign = (document.getElementById('b-btnalign')?.value || 'center');
+
+  const buttonHtml = btnText ? `
+    <div style="text-align:${btnAlign};margin:28px 0">
+      <a href="{{phishing_link}}" style="background:#4f46e5;color:#fff;text-decoration:none;padding:12px 28px;border-radius:6px;font-size:15px;font-weight:bold;display:inline-block">${btnText}</a>
+    </div>` : '';
+
+  // Full-width feature image between header banner and body
+  const imageHtml = imgUrl ? `
+  <div style="line-height:0;overflow:hidden;background:#000">
+    <img src="${imgUrl}" alt="${imgAlt}" style="max-width:100%;width:100%;height:auto;display:block;border:none" />
+  </div>` : '';
+
+  // Compact header when image present, taller otherwise
+  const hPad  = imgUrl ? '12px 28px' : '24px 32px';
+  const hEmojSize = imgUrl ? '28px' : '36px';
+  const hTitleSize = imgUrl ? '16px' : '20px';
+  const headerAlign   = style.headerEmoji ? 'center' : 'left';
+  const headerContent = style.headerEmoji
+    ? `<div style="font-size:${hEmojSize};margin-bottom:4px">${style.headerEmoji}</div><div style="font-size:${hTitleSize};font-weight:bold;color:${style.headerTitleColor||'#fff'}">${style.headerTitle||sender}</div>`
+    : `<div style="font-size:18px;font-weight:bold;color:${style.headerTitleColor||'#fff'}">${sender}</div>`;
+
+  // Footer: logo + signature text OR plain text
+  const footerHtml = logoUrl
+    ? `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <img src="${logoUrl}" alt="${sender}" style="height:36px;display:block" />
+        <p style="font-size:12px;color:#94a3b8;margin:0">${footer}</p>
+       </div>`
+    : `<p style="font-size:12px;color:#94a3b8;margin:0">${footer}</p>`;
+
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,sans-serif">
+  <div style="max-width:560px;margin:40px auto;background:#ffffff;border-radius:10px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.1)">
+    <div style="background:${style.headerBg||'#4f46e5'};padding:${hPad};text-align:${headerAlign}">
+      ${headerContent}
+    </div>
+    ${imageHtml}
+    <div style="padding:32px">
+      ${greeting ? `<p style="font-size:16px;color:#1e293b;margin-bottom:16px">${greeting}</p>` : ''}
+      ${message  ? `<p style="font-size:14px;color:#475569;line-height:1.7;margin-bottom:20px">${message}</p>` : ''}
+      ${buttonHtml}
+      <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
+      ${footerHtml}
+    </div>
+  </div>
+</body></html>`;
+}
+
+function syncBuilderToHtml() {
+  document.getElementById('f-body').value = buildHtmlFromFields();
+}
+
+function syncHtmlToBuilder() {
+  toast('Manual edits in HTML editor will replace builder fields — use templates to reset.', 'info');
+}
+
+function toggleHtmlEditor() {
+  const sec = document.getElementById('html-editor-section');
+  if (sec.style.display === 'none') {
+    syncBuilderToHtml();
+    sec.style.display = 'block';
+  } else {
+    sec.style.display = 'none';
+  }
+}
+
+function autoResizePreviewIframe(iframe) {
+  try {
+    const h = iframe.contentDocument?.documentElement?.scrollHeight || iframe.contentDocument?.body?.scrollHeight;
+    if (h && h > 100) iframe.style.height = (h + 24) + 'px';
+  } catch (_) {}
+}
+
+function previewEmail() {
+  const html = document.getElementById('html-editor-section').style.display !== 'none'
+    ? document.getElementById('f-body').value
+    : buildHtmlFromFields();
+
+  // Replace placeholders with sample values for preview
+  const preview = html
+    .replace(/{{name}}/g, 'John Doe')
+    .replace(/{{first_name}}/g, 'John')
+    .replace(/{{greeting}}/g, _istGreetingSample())
+    .replace(/{{email}}/g, 'john.doe@company.com');
+
+  const iframe = document.getElementById('email-preview-frame');
+  iframe.srcdoc = preview;
+  // reset height; autoResizePreviewIframe fires on iframe onload
+  iframe.style.height = '480px';
+  document.getElementById('email-preview-panel').style.display = 'block';
+  document.getElementById('email-preview-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function openModal(id) {
+  document.getElementById(id).classList.add('open');
+  if (id === 'campaign-modal') renderTemplateGrid();
+}
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+
+async function submitCampaign(e) {
+  e.preventDefault();
+  const btn = document.getElementById('campaign-submit-btn');
+  btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" style="animation:ai-spin .8s linear infinite"></i>Creating…';
+  try {
+    // Use raw HTML editor if visible, otherwise build from visual fields
+    const htmlEditorVisible = document.getElementById('html-editor-section').style.display !== 'none';
+    const body_html = htmlEditorVisible
+      ? document.getElementById('f-body').value.trim()
+      : buildHtmlFromFields();
+
+    if (!body_html) { toast('Please fill in the email content', 'error'); return; }
+
+    const body = {
+      name:         document.getElementById('f-name').value,
+      subject:      document.getElementById('f-subject').value,
+      sender_name:  document.getElementById('f-sender').value,
+      redirect_url: document.getElementById('b-btnurl')?.value?.trim() || '',
+      body_html,
+    };
+    const res = await fetch(`${API_BASE}/phish/campaigns`, { method: 'POST', headers: headers(), body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Failed', 'error'); return; }
+    toast('Campaign created', 'success');
+    closeModal('campaign-modal');
+    e.target.reset();
+    navigate('campaigns');
+  } catch (ex) { toast(ex.message, 'error'); }
+  finally { btn.disabled = false; btn.innerHTML = '<i data-lucide="check"></i>Create campaign'; }
+}
+
+// ===========================================================================
+// Campaign Detail
+// ===========================================================================
+let _detailRefreshTimer = null;
+const DETAIL_REFRESH_MS = 15000;
+
+async function renderCampaignDetail(campaignId) {
+  // Stop any previous detail polling
+  if (_detailRefreshTimer) { clearInterval(_detailRefreshTimer); _detailRefreshTimer = null; }
+  const main = document.getElementById('main-content');
+  let _lastDeviceStats = null;
+  let _lastDeviceStatsKey = '';
+
+  async function _loadDetail() {
+    const [statsRes, recipRes] = await Promise.all([
+      fetch(`${API_BASE}/phish/campaigns/${campaignId}`, { headers: headers() }),
+      fetch(`${API_BASE}/phish/campaigns/${campaignId}/recipients`, { headers: headers() }),
+    ]);
+    const stats = await statsRes.json();
+    const recips = await recipRes.json();
+
+    // Device stats only change when opened/clicked totals change.
+    const key = `${stats.opened || 0}:${stats.clicked || 0}`;
+    if (!_lastDeviceStats || _lastDeviceStatsKey !== key) {
+      const deviceRes = await fetch(`${API_BASE}/phish/campaigns/${campaignId}/device-stats`, { headers: headers() });
+      _lastDeviceStats = await deviceRes.json();
+      _lastDeviceStatsKey = key;
+    }
+
+    return {
+      stats,
+      recips,
+      deviceStats: _lastDeviceStats,
+    };
+  }
+
+  function _renderBreakdownRows(items) {
+    const arr = Array.isArray(items) ? items : [];
+    if (!arr.length) return '<div style="color:var(--muted);font-size:.8rem">No data yet</div>';
+    return `<div style="display:grid;gap:8px">${arr.map(i => {
+      const label = esc(i.label || 'Unknown');
+      const count = Number(i.count || 0);
+      return `<div style="display:flex;align-items:center;justify-content:space-between;background:var(--surface-raised);border:1px solid var(--border);padding:8px 10px;border-radius:8px">
+        <span style="font-size:.85rem">${label}</span>
+        <span style="font-weight:700;color:var(--blue)">${count}</span>
+      </div>`;
+    }).join('')}</div>`;
+  }
+
+  function _renderDetail(stats, recips, deviceStats, lastUpdated) {
+    const ds = deviceStats || {};
+    main.innerHTML = `
+      <div class="page-header">
+        <div>
+          <a href="#" onclick="navigate('campaigns')" style="color:var(--text-secondary);font-size:.8rem;display:inline-flex;align-items:center;gap:4px"><i data-lucide="arrow-left" style="width:13px;height:13px"></i>Back</a>
+          <div class="page-title" style="margin-top:6px;font-size:26px"><i data-lucide="target"></i>${esc(stats.name || campaignId)}</div>
+        </div>
+        <div class="page-header-actions">
+          <span class="live-indicator"><span class="live-dot"></span>Updated <span id="detail-last-refresh">${lastUpdated}</span></span>
+          <button class="icon-btn" id="detail-refresh-btn" onclick="window.__refreshCampaignDetail && window.__refreshCampaignDetail()" title="Refresh now"><i data-lucide="refresh-cw"></i></button>
+          ${can('add_recipients') ? `<button class="btn btn-outline btn-sm" onclick="openRecipientsModal('${campaignId}')"><i data-lucide="user-plus"></i>Add recipients</button>` : ''}
+          ${can('send') ? `<button class="btn btn-outline btn-sm" onclick="validateRecipients('${campaignId}')"><i data-lucide="scan-search"></i>Validate emails</button>` : ''}
+          ${can('send') ? `<button class="btn btn-success btn-sm" onclick="confirmSend('${campaignId}')"><i data-lucide="send"></i>Send campaign</button>` : ''}
+          ${can('send') ? `<button class="btn btn-outline btn-sm" onclick="confirmResend('${campaignId}')"><i data-lucide="refresh-cw"></i>Resend all</button>` : ''}
+          ${(can('send') && (stats.total_duplicates ?? 0) > 0) ? `<button class="btn btn-outline btn-sm" style="color:var(--purple)" onclick="clearDuplicates('${campaignId}',${stats.total_duplicates},'detail')"><i data-lucide="eraser"></i>Clear duplicates (${stats.total_duplicates})</button>` : ''}
+          ${(can('send') && (stats.failed ?? 0) > 0) ? `<button class="btn btn-outline btn-sm" style="color:var(--danger)" onclick="resendFailed('${campaignId}',${stats.failed})"><i data-lucide="send"></i>Resend failed (${stats.failed})</button>` : ''}
+          ${(can('send') && (stats.failed ?? 0) > 0) ? `<button class="btn btn-outline btn-sm" style="color:var(--danger)" onclick="clearFailed('${campaignId}',${stats.failed})"><i data-lucide="eraser"></i>Clear failed (${stats.failed})</button>` : ''}
+          ${can('report') ? `<button class="btn btn-outline btn-sm" onclick="downloadReport('${campaignId}','${esc(stats.name || campaignId)}')"><i data-lucide="file-down"></i>CSV report</button>` : ''}
+          ${can('create_campaign') ? `<button class="btn btn-danger btn-sm" onclick="deleteCampaign('${campaignId}','${esc(stats.name || campaignId)}')"><i data-lucide="trash-2"></i>Delete</button>` : ''}
+        </div>
+      </div>
+      <div class="kpi-grid">
+        ${kpiCard({ icon:'users-round', color:'#3B82F6', value: stats.total ?? 0, label:'Total recipients' })}
+        ${kpiCard({ icon:'send', color:'#3B82F6', value: stats.sent ?? 0, label:'Sent' })}
+        ${kpiCard({ icon:'mail-open', color:'#22C55E', value: stats.opened ?? 0, label:'Opened' })}
+        ${kpiCard({ icon:'mouse-pointer-click', color:'#F59E0B', value: stats.clicked ?? 0, label:'Link clicked' })}
+        ${kpiCard({ icon:'circle-x', color:'#EF4444', value: stats.failed ?? 0, label:'Failed' })}
+        ${kpiCard({ icon:'copy', color:'#A78BFA', value: stats.total_duplicates ?? 0, label:'Duplicate sends' })}
+        ${kpiCard({ icon:'percent', color:'#F59E0B', value: (stats.open_rate ?? 0) + '%', label:'Open rate' })}
+        ${kpiCard({ icon:'trending-up', color:'#FB923C', value: (stats.click_rate ?? 0) + '%', label:'Click rate' })}
+      </div>
+      <div class="card" style="margin-bottom:20px">
+        <div class="card-header-row">
+          <div class="titles"><h3><i data-lucide="monitor-smartphone" style="width:15px;height:15px;vertical-align:-2px;margin-right:6px"></i>Device insights</h3><div class="sub">Detected from recipient open/click user-agent</div></div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px">
+          <div>
+            <div style="font-weight:600;margin-bottom:8px;font-size:13px">Opened: device type</div>
+            ${_renderBreakdownRows(ds.open_by_device)}
+          </div>
+          <div>
+            <div style="font-weight:600;margin-bottom:8px;font-size:13px">Opened: OS</div>
+            ${_renderBreakdownRows(ds.open_by_os)}
+          </div>
+          <div>
+            <div style="font-weight:600;margin-bottom:8px;font-size:13px">Clicked: device type</div>
+            ${_renderBreakdownRows(ds.click_by_device)}
+          </div>
+          <div>
+            <div style="font-weight:600;margin-bottom:8px;font-size:13px">Clicked: OS</div>
+            ${_renderBreakdownRows(ds.click_by_os)}
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="section-header" style="margin-bottom:12px">
+          <h2><i data-lucide="users-round"></i>Recipients</h2>
+          ${can('add_recipients') ? `<button class="btn btn-primary btn-sm" onclick="openRecipientsModal('${campaignId}')"><i data-lucide="plus"></i>Add</button>` : ''}
+        </div>
+        ${recipientTable(recips)}
+      </div>`;
+
+    // Mini pie chart
+    if (stats.total > 0) {
+      const pending = stats.pending || 0;
+      const failed  = stats.failed  || 0;
+      const clicked = stats.clicked || 0;
+      const opened  = Math.max(0, (stats.opened || 0) - clicked);
+      const sent    = Math.max(0, (stats.sent || 0) - (stats.opened || 0));
+      const chartHtml = `<div class="card" style="margin-bottom:20px">
+        <div class="card-header-row"><div class="titles"><h3>Recipient status breakdown</h3><div class="sub">Where each recipient stands right now</div></div></div>
+        <div class="chart-wrap"><canvas id="detail-pie"></canvas></div></div>`;
+      const recCard = main.querySelector('.card');
+      recCard.insertAdjacentHTML('beforebegin', chartHtml);
+      new Chart(document.getElementById('detail-pie').getContext('2d'), {
+        type: 'pie',
+        data: { labels: ['Clicked link', 'Opened (no click)', 'Sent (not opened)', 'Pending', 'Failed'], datasets: [{ data: [clicked, opened, sent, pending, failed], backgroundColor: ['#F59E0B', '#22C55E', '#3B82F6', '#475569', '#EF4444'] }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#94A3B8' } } } }
+      });
+    }
+  }
+
+  // Shared refresh used by both the interval timer and the manual button.
+  async function _refreshNow() {
+    if (document.hidden) return;
+    try {
+      const { stats: s2, recips: r2, deviceStats: d2 } = await _loadDetail();
+      _renderDetail(s2, r2, d2, new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit',second:'2-digit'}));
+    } catch (_) {}
+  }
+  // Expose for the manual "Refresh" button rendered in the header.
+  window.__refreshCampaignDetail = _refreshNow;
+
+  try {
+    const { stats, recips, deviceStats } = await _loadDetail();
+    _renderDetail(stats, recips, deviceStats, new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit',second:'2-digit'}));
+
+    // Auto-refresh every DETAIL_REFRESH_MS while on this page
+    _detailRefreshTimer = setInterval(_refreshNow, DETAIL_REFRESH_MS);
+  } catch (e) { main.innerHTML = `<div class="empty">Error: ${e.message}</div>`; }
+}
+
+function recipientTable(recips) {
+  if (!recips.length) return `<div class="empty-state"><div class="icon-wrap"><i data-lucide="users-round"></i></div><h3>No recipients yet</h3><p>Add recipients below to start this simulation.</p></div>`;
+  return `<div class="table-scroll"><table>
+    <thead><tr><th>Email</th><th>Name</th><th>Status</th><th>Added at</th><th>Sent at</th><th>Opened at</th><th>Open device</th><th>Opens</th><th>Clicked at</th><th>Click device</th><th>Clicks</th><th>Sends</th><th></th></tr></thead>
+    <tbody>${recips.map(r => {
+      const status  = (r.status || r.Status || 'pending').toLowerCase();
+      const clicks  = r.click_count ?? 0;
+      const openDevice = [r.opened_device_type, r.opened_os].filter(Boolean).join(' / ') || '—';
+      const clickDevice = [r.clicked_device_type, r.clicked_os].filter(Boolean).join(' / ') || '—';
+      const isFailed  = status === 'failed';
+      const badgeCls  = isFailed ? 'badge-failed' : (clicks > 0 ? 'badge-clicked' : `badge-${status}`);
+      const badgeLbl  = isFailed ? 'failed' : (clicks > 0 ? `clicked (${clicks})` : status);
+      const failReason = (r.fail_reason || '').toString();
+      return `<tr>
+        <td>${esc(r.email || r.Email || '')}</td>
+        <td>${esc(r.name || r.Name || '')}</td>
+        <td>
+          <span class="badge ${badgeCls}"${isFailed && failReason ? ` title="${esc(failReason)}"` : ''}>${badgeLbl}</span>
+          ${isFailed && failReason ? `<div style="font-size:.72rem;color:var(--danger);margin-top:3px;max-width:230px;word-break:break-word">${esc(failReason.slice(0,100))}${failReason.length>100?'…':''}</div>` : ''}
+        </td>
+        <td>${fmt(r.created_at)}</td>
+        <td>${isFailed ? fmt(r.failed_at) : fmt(r.sent_at || r.SentAt)}</td>
+        <td>${fmt(r.opened_at || r.OpenedAt)}</td>
+        <td>${esc(openDevice)}</td>
+        <td>${r.open_count ?? r.OpenCount ?? 0}</td>
+        <td>${r.clicked_at ? fmt(r.clicked_at) : '—'}</td>
+        <td>${esc(clickDevice)}</td>
+        <td>${clicks > 0 ? `<span style="color:var(--warn);font-weight:600">${clicks}</span>` : '0'}</td>
+        <td>${(r.send_count ?? 0) > 1 ? `<span style="color:var(--purple);font-weight:600;display:inline-flex;align-items:center;gap:4px" title="Sent ${r.send_count} times"><i data-lucide="triangle-alert" style="width:12px;height:12px"></i>${r.send_count}</span>` : (r.send_count ?? 0)}</td>
+        <td>${can('add_recipients') ? `<button class="icon-btn" style="color:var(--danger)" onclick="deleteRecipient('${r.id}','${esc(r.email || '')}')"><i data-lucide="trash-2"></i></button>` : ''}</td>
+      </tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+
+// ===========================================================================
+// Recipients page
+// ===========================================================================
+async function renderRecipientsPage() {
+  const main = document.getElementById('main-content');
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns`, { headers: headers() });
+    if (res.status === 401) { _handleUnauthorized(401); return; }
+    if (res.status === 403) { main.innerHTML = unauthorizedHtml(403); return; }
+    const campaigns = await res.json();
+    main.innerHTML = `
+      <div class="page-header"><div><div class="page-title"><i data-lucide="users-round"></i>Recipients</div><div class="page-subtitle">View recipients across any campaign</div></div></div>
+      <div class="card">
+        <div class="form-group">
+          <label>Select campaign</label>
+          <select id="recip-campaign-select" onchange="loadRecipientsFor(this.value)">
+            <option value="">— choose a campaign —</option>
+            ${campaigns.map(c => `<option value="${c.id || c.RowKey}">${esc(c.name || c.Name)}</option>`).join('')}
+          </select>
+        </div>
+        <div id="recip-table-area"><div class="empty-state"><div class="icon-wrap"><i data-lucide="mouse-pointer-2"></i></div><h3>Select a campaign</h3><p>Choose a campaign above to view its recipients.</p></div></div>
+        <div id="recip-add-btn-area"></div>
+      </div>`;
+  } catch (e) { main.innerHTML = `<div class="empty">Error: ${e.message}</div>`; }
+}
+
+async function loadRecipientsFor(campaignId) {
+  if (!campaignId) return;
+  selectedCampaignId = campaignId;
+  const area = document.getElementById('recip-table-area');
+  const btnArea = document.getElementById('recip-add-btn-area');
+  area.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${campaignId}/recipients`, { headers: headers() });
+    const data = await res.json();
+    area.innerHTML = recipientTable(data);
+    btnArea.innerHTML = can('add_recipients') ? `<div class="mt-4"><button class="btn btn-primary" onclick="openRecipientsModal('${campaignId}')"><i data-lucide="plus"></i>Add recipients</button></div>` : '';
+  } catch (e) { area.innerHTML = `<div class="empty">Error: ${e.message}</div>`; }
+}
+
+// ===========================================================================
+// Reports page
+// ===========================================================================
+async function renderReports() {
+  const main = document.getElementById('main-content');
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns`, { headers: headers() });
+    if (res.status === 401) { _handleUnauthorized(401); return; }
+    if (res.status === 403) { main.innerHTML = unauthorizedHtml(403); return; }
+    const campaigns = await res.json();
+    main.innerHTML = `
+      <div class="page-header"><div><div class="page-title"><i data-lucide="file-down"></i>Reports</div><div class="page-subtitle">Download campaign data as CSV</div></div></div>
+      <div class="card">
+        ${campaigns.length ? `<div class="table-scroll"><table>
+          <thead><tr><th>Campaign</th><th>Status</th><th>Created</th><th>Download</th></tr></thead>
+          <tbody>${campaigns.map(c => `<tr>
+            <td>${esc(c.name || c.Name)}</td>
+            <td><span class="badge badge-${(c.status || c.Status || 'draft').toLowerCase()}">${c.status || c.Status || 'draft'}</span></td>
+            <td>${fmt(c.created_at || c.CreatedAt)}</td>
+            <td><button class="btn btn-success btn-sm" onclick="downloadReport('${c.id || c.RowKey}','${esc(c.name || c.Name)}')"><i data-lucide="file-down"></i>CSV</button></td>
+          </tr>`).join('')}</tbody></table></div>`
+          : `<div class="empty-state"><div class="icon-wrap"><i data-lucide="file-down"></i></div><h3>No campaigns found</h3><p>Once you create a campaign, its CSV report will be downloadable here.</p></div>`}
+      </div>`;
+  } catch (e) { main.innerHTML = `<div class="empty">Error: ${e.message}</div>`; }
+}
+
+// ===========================================================================
+// Add Recipients Modal
+// ===========================================================================
+function openRecipientsModal(campaignId) {
+  selectedCampaignId = campaignId;
+  excelRecipients = [];
+  document.getElementById('recipients-modal').classList.add('open');
+  // Reset
+  document.getElementById('r-email').value = '';
+  document.getElementById('r-name').value = '';
+  document.getElementById('r-bulk').value = '';
+  document.getElementById('r-file').value = '';
+  document.getElementById('excel-preview').innerHTML = '';
+  switchTab('tab-single');
+}
+
+function switchTab(tabId) {
+  activeTab = tabId;
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    const ids = ['tab-single', 'tab-bulk', 'tab-excel'];
+    t.classList.toggle('active', ids[i] === tabId);
+  });
+  ['tab-single', 'tab-bulk', 'tab-excel'].forEach(id => {
+    document.getElementById(id).style.display = id === tabId ? '' : 'none';
+  });
+}
+
+function previewExcel() {
+  const file = document.getElementById('r-file').files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function (e) {
+    const data = new Uint8Array(e.target.result);
+    const wb = XLSX.read(data, { type: 'array' });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+    excelRecipients = rows
+      .map(r => ({
+        email: (r.email || r.Email || r.EMAIL || '').toString().trim().toLowerCase(),
+        name: (r.name || r.Name || r.NAME || '').toString().trim(),
+      }))
+      .filter(r => r.email);
+
+    const preview = document.getElementById('excel-preview');
+    if (!excelRecipients.length) {
+      preview.innerHTML = '<p style="color:var(--danger);margin-top:8px">No valid email rows found. Make sure column is named "email".</p>';
+      return;
+    }
+    preview.innerHTML = `<p style="color:var(--success);margin-top:8px;display:flex;align-items:center;gap:6px"><i data-lucide="check-circle-2" style="width:14px;height:14px"></i>Found ${excelRecipients.length} email(s). Preview (first 5):</p>
+      <table style="margin-top:8px"><thead><tr><th>Email</th><th>Name</th></tr></thead>
+      <tbody>${excelRecipients.slice(0, 5).map(r => `<tr><td>${esc(r.email)}</td><td>${esc(r.name)}</td></tr>`).join('')}</tbody></table>`;
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+async function submitRecipients() {
+  let recipients = [];
+
+  if (activeTab === 'tab-single') {
+    const email = document.getElementById('r-email').value.trim();
+    const name  = document.getElementById('r-name').value.trim();
+    if (!email) { toast('Please enter an email address', 'error'); return; }
+    recipients = [{ email, name: name || email }];
+  } else if (activeTab === 'tab-bulk') {
+    const raw = document.getElementById('r-bulk').value;
+    recipients = parseBulk(raw);
+    if (!recipients.length) { toast('No valid emails found in bulk input', 'error'); return; }
+  } else {
+    recipients = excelRecipients;
+    if (!recipients.length) { toast('No recipients from Excel – upload a file first', 'error'); return; }
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${selectedCampaignId}/recipients`, {
+      method: 'POST', headers: headers(), body: JSON.stringify({ recipients })
+    });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Failed to add recipients', 'error'); if (data.warnings?.length) alert('Invalid domains:\n\n' + data.warnings.join('\n')); return; }
+    let msg = `Added ${data.added} recipient(s)`;
+    if (data.invalid?.length) msg += `, ${data.invalid.length} invalid skipped`;
+    if (data.warnings?.length) {
+      msg += ` (${data.warnings.length} bad domain${data.warnings.length>1?'s':''})`;
+      toast(msg, 'error');
+      alert('Rejected – Invalid Email Domains:\n\n' + data.warnings.join('\n'));
+    } else {
+      toast(msg, 'success');
+    }
+    closeModal('recipients-modal');
+    if (currentPage === 'campaign-detail') renderCampaignDetail(selectedCampaignId);
+    if (currentPage === 'recipients') loadRecipientsFor(selectedCampaignId);
+  } catch (ex) { toast(ex.message, 'error'); }
+}
+
+function parseBulk(raw) {
+  const lines = raw.split(/[\n,]+/);
+  return lines.map(l => {
+    l = l.trim();
+    const match = l.match(/^(.+?)\s*<(.+?)>$/);
+    if (match) return { name: match[1].trim(), email: match[2].trim().toLowerCase() };
+    return { email: l.toLowerCase(), name: l };
+  }).filter(r => r.email && r.email.includes('@'));
+}
+
+// ===========================================================================
+// Send Campaign (confirmation)
+// ===========================================================================
+// Delete campaign
+// ===========================================================================
+async function deleteCampaign(campaignId, name) {
+  const ok = await confirm2(`Permanently delete campaign "${name}"?\n\nThis will also delete ALL recipients and tracking data. This cannot be undone.`);
+  if (!ok) return;
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${campaignId}`, { method: 'DELETE', headers: headers() });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Delete failed', 'error'); return; }
+    toast(`Campaign "${name}" deleted`, 'success');
+    navigate('campaigns');
+  } catch (ex) { toast(ex.message, 'error'); }
+}
+
+// ===========================================================================
+// Delete recipient
+// ===========================================================================
+async function deleteRecipient(recipientId, email) {
+  const ok = await confirm2(`Remove ${email} from this campaign?\n\nAll tracking data for this recipient will be lost.`);
+  if (!ok) return;
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${selectedCampaignId}/recipients/${recipientId}`, { method: 'DELETE', headers: headers() });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Delete failed', 'error'); return; }
+    toast(`${email} removed`, 'success');
+    if (currentPage === 'campaign-detail') renderCampaignDetail(selectedCampaignId);
+    if (currentPage === 'recipients') loadRecipientsFor(selectedCampaignId);
+  } catch (ex) { toast(ex.message, 'error'); }
+}
+
+// ===========================================================================
+// Resend campaign (reset all + re-fire)
+// ===========================================================================
+async function confirmResend(campaignId) {
+  const ok = await confirm2(`Resend to ALL recipients of this campaign?\n\nThis will:\n• Reset open/click tracking to zero\n• Generate fresh tracking links for everyone\n• Send the email again to every recipient`);
+  if (!ok) return;
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${campaignId}/resend`, { method: 'POST', headers: headers() });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Resend failed', 'error'); return; }
+    if (data.message) { toast(data.message, 'info'); return; }
+    const sentCount = data.sent ?? 0;
+    const failedCount = data.failed ?? 0;
+    if (failedCount > 0) toast(`${failedCount} email(s) failed. ${data.error_detail ? data.error_detail.substring(0,80) : ''}`, 'error');
+    if (sentCount > 0) toast(`Resent to ${sentCount} recipient(s)`, 'success');
+    setTimeout(() => renderCampaignDetail(campaignId), 800);
+  } catch (ex) { toast(ex.message, 'error'); }
+}
+
+// ===========================================================================
+// Clear duplicate-send counter
+// ===========================================================================
+async function clearDuplicates(campaignId, count, source) {
+  const ok = await confirm2(`Clear ${count} duplicate send record(s)?\n\nThis resets only the duplicate counter — no emails are deleted or resent.`);
+  if (!ok) return;
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${campaignId}/duplicates`, { method: 'DELETE', headers: headers() });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Clear failed', 'error'); return; }
+    toast(`Cleared ${data.cleared} duplicate send record(s)`, 'success');
+    if (source === 'detail') setTimeout(() => renderCampaignDetail(campaignId), 600);
+    else setTimeout(() => renderCampaigns(), 600);
+  } catch (ex) { toast(ex.message, 'error'); }
+}
+
+// ===========================================================================
+// Resend ONLY the failed recipients (useful after hitting Gmail's 2k/day cap).
+// Backend flips failed -> pending and reuses the same background send pipeline.
+// ===========================================================================
+async function resendFailed(campaignId, count) {
+  const ok = await confirm2(`Resend to ${count} previously-failed recipient(s) only?\n\nOther recipients (already sent / pending) will NOT be touched.\n\nUse this after Gmail's daily quota resets to retry the ones that bounced.`);
+  if (!ok) return;
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${campaignId}/resend-failed`, { method: 'POST', headers: headers() });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Resend failed', 'error'); return; }
+    if (data.message && !data.queued) { toast(data.message, 'info'); return; }
+    const queued = data.queued ?? 0;
+    if (queued > 0) toast(`Resend queued for ${queued} failed recipient(s) — running in background.`, 'success');
+    setTimeout(() => renderCampaignDetail(campaignId), 800);
+  } catch (ex) { toast(ex.message, 'error'); }
+}
+
+// ===========================================================================
+// Clear failed recipients
+// ===========================================================================
+async function clearFailed(campaignId, count) {
+  const ok = await confirm2(`Clear ${count} failed recipient(s)?\n\nThis resets them back to "pending" so they are included in the next Send.`);
+  if (!ok) return;
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${campaignId}/failed`, { method: 'DELETE', headers: headers() });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Clear failed', 'error'); return; }
+    toast(`Cleared ${data.cleared} failed recipient(s) — now pending`, 'success');
+    setTimeout(() => renderCampaignDetail(campaignId), 600);
+  } catch (ex) { toast(ex.message, 'error'); }
+}
+
+// ===========================================================================
+async function validateRecipients(campaignId) {
+  const ok = await confirm2('Validate all recipients\' email addresses?\n\nThis checks DNS/MX records and mailbox existence. Invalid emails will be marked as Failed.');
+  if (!ok) return;
+  toast('Validating emails… this may take a moment', 'info');
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${campaignId}/validate`, { method: 'POST', headers: headers() });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Validation failed', 'error'); return; }
+    const inv = data.invalid || 0;
+    const val = data.valid || 0;
+    if (inv === 0) {
+      toast(`All ${val} email(s) passed validation`, 'success');
+    } else {
+      // Show details of invalid emails
+      const invalidList = (data.results || []).filter(r => !r.valid);
+      const details = invalidList.map(r => `• ${r.email}: ${r.reason}`).join('\n');
+      toast(`${inv} invalid email(s) found and marked as Failed.\n${val} email(s) are valid.`, 'error');
+      if (details) {
+        console.warn('Invalid emails:\n' + details);
+        alert(`Invalid Emails Found (${inv}):\n\n${details}`);
+      }
+    }
+    setTimeout(() => navigate('campaign-detail', campaignId), 800);
+  } catch (ex) { toast(ex.message, 'error'); }
+}
+
+// ===========================================================================
+async function confirmSend(campaignId) {
+  const ok = await confirm2(`Send emails to all PENDING recipients of campaign ${campaignId}?\n\nThis will enqueue them immediately.`);
+  if (!ok) return;
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${campaignId}/send`, { method: 'POST', headers: headers() });
+    const data = await res.json();
+    if (!res.ok) { toast(data.error || 'Failed', 'error'); return; }
+    if (data.message) { toast(data.message, 'info'); return; }
+    const sentCount = data.sent ?? data.queued ?? 0;
+    const failedCount = data.failed ?? 0;
+    if (sentCount === 0 && failedCount === 0) { toast('No pending recipients to send to. Add recipients first.', 'info'); return; }
+    if (failedCount > 0) toast(`${failedCount} email(s) failed.${data.skipped_invalid ? ` (${data.skipped_invalid} invalid email${data.skipped_invalid>1?'s':''} skipped)` : ''} ${data.error_detail ? data.error_detail.substring(0,80) : 'Check logs for details.'}`, 'error');
+    if (sentCount > 0) toast(`${sentCount} email(s) sent successfully`, 'success');
+    setTimeout(() => navigate('campaign-detail', campaignId), 800);
+  } catch (ex) { toast(ex.message, 'error'); }
+}
+
+// ===========================================================================
+// Download CSV report
+// ===========================================================================
+async function downloadReport(campaignId, name) {
+  try {
+    const res = await fetch(`${API_BASE}/phish/campaigns/${campaignId}/report`, { headers: headers() });
+    if (!res.ok) { toast('Failed to download report', 'error'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `phishing_report_${name.replace(/[^a-z0-9]/gi, '_')}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('Report downloaded', 'success');
+  } catch (ex) { toast(ex.message, 'error'); }
+}
+
+// ===========================================================================
+// Confirm dialog (custom, no window.confirm)
+// ===========================================================================
+function confirm2(msg) {
+  return new Promise(resolve => {
+    confirmResolve = resolve;
+    document.getElementById('confirm-msg').textContent = msg;
+    document.getElementById('confirm-dialog').classList.add('open');
+  });
+}
+function closeConfirm(result) {
+  document.getElementById('confirm-dialog').classList.remove('open');
+  if (confirmResolve) { confirmResolve(result); confirmResolve = null; }
+}
+
+// ===========================================================================
+// Utilities
+// ===========================================================================
+function esc(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function fmt(iso) {
+  if (!iso || iso === 'None' || iso === 'null') return '—';
+  try {
+    return new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true });
+  } catch { return iso; }
+}
+function unauthorizedHtml(status = 401) {
+  return status === 403
+    ? `<div class="empty-state"><div class="icon-wrap"><i data-lucide="shield-off"></i></div><h3>Access denied</h3><p>Your role (${ROLE_LABELS[CURRENT_ROLE] || 'unknown'}) cannot view this section.</p></div>`
+    : `<div class="empty-state"><div class="icon-wrap"><i data-lucide="lock"></i></div><h3>Session expired</h3><p>Your session has ended.</p><button class="btn btn-primary" onclick="doLogout()"><i data-lucide="log-in"></i>Log in again</button></div>`;
+}
+
+// Auto-redirect to login on 401 (session expired / restart)
+function _handleUnauthorized(status) {
+  if (status === 401) {
+    // Session is gone (server restart or token expired) – force re-login
+    SESSION_TOKEN = ''; CURRENT_ROLE = null; CURRENT_USERNAME = '';
+    localStorage.removeItem('phish_session_token');
+    localStorage.removeItem('phish_role');
+    localStorage.removeItem('phish_username');
+    document.getElementById('user-topbar').classList.remove('visible');
+    document.getElementById('login-overlay').style.display = 'flex';
+    toast('Session expired – please log in again.', 'warning');
+    return true;
+  }
+  return false;
+}
+
+// ===========================================================================
+// Gemini AI Campaign Generator
+// ===========================================================================
+
+function switchCampaignMode(mode) {
+  const tabs = document.querySelectorAll('#campaign-mode-tabs .tab');
+  tabs.forEach((t, i) => t.classList.toggle('active', (mode === 'builder' && i === 0) || (mode === 'ai' && i === 1)));
+  document.getElementById('builder-mode').style.display = mode === 'builder' ? '' : 'none';
+  document.getElementById('ai-mode').style.display      = mode === 'ai'      ? '' : 'none';
+}
+
+async function generateWithAI() {
+  const promptEl = document.getElementById('ai-prompt');
+  const toneEl   = document.getElementById('ai-tone');
+  const typeEl   = document.getElementById('ai-type');
+  const constEl  = document.getElementById('ai-constraints');
+  const statusEl = document.getElementById('ai-status');
+  const btn      = document.getElementById('ai-generate-btn');
+
+  const prompt = (promptEl?.value || '').trim();
+  if (!prompt) { toast('Please describe what kind of email you want', 'error'); promptEl?.focus(); return; }
+
+  btn.disabled = true;
+  statusEl.innerHTML = '<div class="ai-thinking">AI is generating your email…</div>';
+
+  try {
+    const res = await fetch(API_BASE + '/phish/ai/generate', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        prompt:      prompt,
+        type:        typeEl?.value || 'custom',
+        tone:        toneEl?.value || 'professional',
+        constraints: constEl?.value || '',
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Server error ${res.status}`);
+    }
+    const result = await res.json();
+
+    // Populate builder fields
+    if (result.subject)    document.getElementById('f-subject').value  = result.subject;
+    if (result.senderName) document.getElementById('f-sender').value   = result.senderName;
+    if (result.greeting)   document.getElementById('b-greeting').value = result.greeting;
+    if (result.message)    document.getElementById('b-message').value  = result.message;
+    document.getElementById('b-btntext').value = result.btnText || '';
+    document.getElementById('b-btnurl').value  = result.btnUrl  || 'https://login.microsoftonline.com';
+    if (result.footer)     document.getElementById('b-footer').value   = result.footer;
+    currentTemplateStyle = { headerBg:'#4f46e5', headerEmoji:'', headerTitle:'', headerTitleColor:'#ffffff' };
+
+    statusEl.innerHTML = `<div style="color:var(--success);font-size:.82rem;padding:8px 12px;background:var(--success-tint);border-radius:6px;margin-bottom:10px;display:flex;align-items:center;gap:6px">
+      <i data-lucide="check-circle-2" style="width:14px;height:14px"></i>Email content generated! Switching to Template Builder so you can preview and customise.
+    </div>`;
+
+    setTimeout(() => {
+      switchCampaignMode('builder');
+      document.querySelectorAll('.template-card').forEach(c => c.classList.remove('selected'));
+    }, 1000);
+    toast('Gemini AI generated your campaign email', 'success');
+  } catch (ex) {
+    statusEl.innerHTML = `<div style="color:var(--danger);font-size:.82rem;padding:8px 12px;background:var(--danger-tint);border-radius:6px;margin-bottom:10px">${esc(ex.message)}</div>`;
+    toast('AI error: ' + ex.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ===========================================================================
+// Image Upload & Preview helpers
+// ===========================================================================
+function handleImageUpload(input, urlFieldId, previewId, previewImgId) {
+  const file = input.files[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) { toast('Image must be under 5 MB', 'error'); input.value = ''; return; }
+
+  // 1. Set data-URL immediately so preview + URL field work right away
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const urlField = document.getElementById(urlFieldId);
+    const preview  = document.getElementById(previewId);
+    const img      = document.getElementById(previewImgId);
+    if (urlField) urlField.value = e.target.result;
+    if (preview && img) { img.src = e.target.result; preview.style.display = ''; }
+  };
+  reader.readAsDataURL(file);
+
+  // 2. Upload to server – overwrite URL field with server path (used for CID embedding in sent email)
+  const fd = new FormData();
+  fd.append('image', file);
+  const token = SESSION_TOKEN || localStorage.getItem('phish_session_token') || '';
+  fetch('/api/phish/upload/image', {
+    method: 'POST',
+    headers: { 'X-Admin-Key': token },
+    body: fd
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.url) {
+      const urlField = document.getElementById(urlFieldId);
+      if (urlField) urlField.value = data.url;
+      toast('Image uploaded', 'success');
+    } else {
+      toast('Upload failed: ' + (data.error || 'unknown error'), 'error');
+    }
+  })
+  .catch(() => toast('Image upload failed – check server connection', 'error'));
+}
+
+function updateImagePreview() {
+  const url  = (document.getElementById('b-imgurl')?.value  || '').trim();
+  const prev = document.getElementById('b-imgpreview');
+  const img  = document.getElementById('b-imgpreview-img');
+  if (prev && img) { if (url) { img.src = url; prev.style.display = ''; } else { prev.style.display = 'none'; } }
+}
+
+function updateLogoPreview() {
+  const url  = (document.getElementById('b-logourl')?.value || '').trim();
+  const prev = document.getElementById('b-logopreview');
+  const img  = document.getElementById('b-logopreview-img');
+  if (prev && img) { if (url) { img.src = url; prev.style.display = ''; } else { prev.style.display = 'none'; } }
+}
+
+function clearImage() {
+  const u = document.getElementById('b-imgurl'),  f = document.getElementById('b-imgfile'),  p = document.getElementById('b-imgpreview');
+  if (u) u.value = ''; if (f) f.value = ''; if (p) p.style.display = 'none';
+}
+
+function clearLogo() {
+  const u = document.getElementById('b-logourl'), f = document.getElementById('b-logofile'), p = document.getElementById('b-logopreview');
+  if (u) u.value = ''; if (f) f.value = ''; if (p) p.style.display = 'none';
+}
+
+// ===========================================================================
+// Users Management (Admin only)
+// ===========================================================================
+// ===========================================================================
+// Settings – GitHub Pages + tracking configuration guide
+// ===========================================================================
+function renderSettings() {
+  const funcBase  = window.location.origin;
+  const pingUrl   = `${funcBase}/api/track/ping/TEST_TOKEN_HERE`;
+  const openUrl   = `${funcBase}/api/track/open/TEST_TOKEN_HERE`;
+  const clickUrl  = `${funcBase}/api/track/click/TEST_TOKEN_HERE`;
+  const el = document.getElementById('main-content');
+  el.innerHTML = `
+  <div class="page-header"><div><div class="page-title"><i data-lucide="settings"></i>Settings</div><div class="page-subtitle">Tracking configuration &amp; GitHub Pages setup</div></div></div>
+
+  <!-- Status panel -->
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-title">Current function base URL</div>
+    <div style="font-family:monospace;font-size:.95rem;color:var(--blue);margin:.5rem 0">${esc(funcBase)}</div>
+    <div style="font-size:.8rem;color:var(--muted);margin-top:4px">
+      This is the URL detected from your browser. Update <code>PHISHING_BASE_URL</code> in
+      your environment configuration to match your deployed URL.
+    </div>
+  </div>
+
+  <!-- Quick test buttons -->
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-title">Test tracking endpoints</div>
+    <p style="font-size:.83rem;color:var(--muted);margin-bottom:14px">
+      These buttons open the tracking URLs in a new tab so you can verify they respond correctly.
+    </p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <a href="${esc(pingUrl)}" target="_blank" class="btn btn-success btn-sm"><i data-lucide="radio"></i>Test ping endpoint</a>
+      <a href="${esc(openUrl)}" target="_blank" class="btn btn-outline btn-sm"><i data-lucide="mail-open"></i>Test open pixel</a>
+      <a href="${esc(clickUrl)}" target="_blank" class="btn btn-outline btn-sm"><i data-lucide="link"></i>Test click redirect</a>
+    </div>
+    <div style="font-size:.78rem;color:var(--muted);margin-top:10px">
+      <strong>Ping</strong> should return <code>{"ok":true}</code> &nbsp;|&nbsp;
+      <strong>Open Pixel</strong> should return a 1×1 PNG image &nbsp;|&nbsp;
+      <strong>Click</strong> should redirect to microsoft.com (fallback, no real token)
+    </div>
+  </div>
+
+  <!-- Why tracking fails locally -->
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-title" style="color:var(--warn)">Why tracking doesn't work on localhost</div>
+    <p style="font-size:.85rem;line-height:1.7;margin-bottom:12px">
+      When the app runs locally (<code>localhost</code>), the tracking pixel and click URLs
+      embedded in emails also point to <code>localhost</code>. Email recipients on other machines or outside
+      your network <strong>cannot reach localhost</strong>, so opens and clicks are never recorded.
+    </p>
+    <div style="font-size:.85rem;line-height:1.7">
+      <strong>Solutions:</strong><br>
+      1. <strong>Deploy publicly</strong> — set <code>PHISHING_BASE_URL</code> to your deployed URL
+         (e.g. <code>https://myapp.azurewebsites.net</code>). Both click and open tracking will work.<br>
+      2. <strong>Use GitHub Pages</strong> (click tracking only) — see instructions below. The email button
+         points to your GitHub Pages page; the page sends a beacon back to this app.<br>
+      3. <strong>Use ngrok / Cloudflare Tunnel</strong> for local testing — expose your local server
+         temporarily and update <code>PHISHING_BASE_URL</code> to the public tunnel URL.
+    </div>
+  </div>
+
+  <!-- GitHub Pages setup guide -->
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-title">GitHub Pages static landing page — setup guide</div>
+    <p style="font-size:.85rem;color:var(--muted);margin-bottom:16px">
+      The file <code>github_pages/index.html</code> is a fake Microsoft 365 login page.
+      Host it on GitHub Pages and configure the URL below so all future campaign emails
+      point recipients there instead of directly to this app.
+    </p>
+
+    <div style="display:flex;flex-direction:column;gap:18px">
+
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div class="step-badge">1</div>
+        <div>
+          <strong>Create a GitHub repository</strong> (e.g. <code>phish-landing</code>, can be public or private with Pages enabled).
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div class="step-badge">2</div>
+        <div>
+          <strong>Upload <code>github_pages/index.html</code></strong> from this project as <code>index.html</code>
+          in the root of your repo (or in a <code>/docs</code> folder).
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div class="step-badge">3</div>
+        <div>
+          <strong>Enable GitHub Pages</strong> in your repo settings → Pages → Deploy from branch → <code>main</code> / root.
+          Your site URL will be <code>https://&lt;username&gt;.github.io/&lt;repo&gt;</code>.
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div class="step-badge">4</div>
+        <div>
+          <strong>Deploy this app publicly</strong> and note the URL
+          (e.g. <code>https://myapp.azurewebsites.net</code>).
+          Add the same URL as <code>PHISHING_BASE_URL</code> in your environment settings.
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div class="step-badge">5</div>
+        <div>
+          <strong>Set <code>PHISHING_GITHUB_PAGES_URL</code></strong> in your environment settings
+          to your GitHub Pages URL, e.g.:<br>
+          <code style="background:var(--surface-raised);padding:3px 8px;border-radius:4px;font-size:.82rem">
+            https://yourusername.github.io/phish-landing
+          </code>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div class="step-badge done"><i data-lucide="check" style="width:14px;height:14px"></i></div>
+        <div>
+          <strong>Done!</strong> Future campaign emails will now embed links like:<br>
+          <code style="background:var(--surface-raised);padding:3px 8px;border-radius:4px;font-size:.78rem;word-break:break-all">
+            https://yourusername.github.io/phish-landing/?t={token}&amp;api=https://myapp...&amp;r={redirect_url}
+          </code><br>
+          <span style="font-size:.8rem;color:var(--muted)">
+            When a recipient clicks → lands on fake login → page fires beacon to the app → click recorded in dashboard.
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Open tracking note -->
+  <div class="card">
+    <div class="card-title">Email open tracking</div>
+    <p style="font-size:.85rem;line-height:1.7">
+      Open tracking works by embedding a 1×1 invisible pixel image in each email. When the recipient's
+      email client loads the image, this app records the open event.<br><br>
+      <strong>This requires the app to be publicly accessible</strong> — it cannot be done via
+      GitHub Pages alone (email clients don't execute JavaScript, so there's no way to fire a beacon
+      from a static image).<br><br>
+      Once deployed publicly with <code>PHISHING_BASE_URL</code> set correctly, open tracking works
+      automatically — no extra setup needed.
+    </p>
+  </div>
+  `;
+}
+
+// ===========================================================================
+// Init – validate stored session then render
+// ===========================================================================
+(async () => {
+  if (SESSION_TOKEN) {
+    try {
+      const res = await fetch(`${API_BASE}/phish/me`, { headers: headers() });
+      if (res.ok) {
+        const data = await res.json();
+        CURRENT_ROLE     = data.role || null;
+        CURRENT_USERNAME = data.username || '';
+        SESSION_STARTED_AT = SESSION_STARTED_AT || new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'});
+        localStorage.setItem('phish_role',     CURRENT_ROLE     || '');
+        localStorage.setItem('phish_username', CURRENT_USERNAME);
+      } else {
+        SESSION_TOKEN = ''; CURRENT_ROLE = null; CURRENT_USERNAME = '';
+        localStorage.removeItem('phish_session_token');
+        localStorage.removeItem('phish_role');
+        localStorage.removeItem('phish_username');
+      }
+    } catch { CURRENT_ROLE = null; }
+  }
+  if (!SESSION_TOKEN || !CURRENT_ROLE) {
+    document.getElementById('login-overlay').style.display = 'flex';
+    initClerkAuth();
+  } else {
+    document.getElementById('login-overlay').style.display = 'none';
+    updateRoleUI();
+    renderPage();
+  }
+})();
+</script>
+</body>
+</html>
