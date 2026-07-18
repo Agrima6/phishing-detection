@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY config.py .
 COPY app.py .
-COPY auth_sso.py .
+COPY auth_clerk.py .
 COPY phishing_campaign_service.py .
 COPY gemini_service.py .
 COPY static/ static/
