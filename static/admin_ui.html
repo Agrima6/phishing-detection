@@ -1138,6 +1138,7 @@ async function renderDashboard() {
     if (res.status === 401) { _handleUnauthorized(401); return; }
     if (res.status === 403) { main.innerHTML = unauthorizedHtml(403); return; }
     const data = await res.json();
+    if (!res.ok) { main.innerHTML = `<div class="empty">Error loading dashboard: ${data.error || res.statusText}</div>`; return; }
 
     const totalCampaigns = data.length;
     const totalSent  = data.reduce((s, c) => s + (c.sent || 0), 0);
