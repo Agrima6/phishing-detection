@@ -8,12 +8,13 @@ RUN apt-get update \
     && echo "deb [signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql-release.list \
     && apt-get update \
     && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 unixodbc-dev \
-    && apt-get purge -y --auto-remove curl apt-transport-https gnupg2 \
     && rm -rf /var/lib/apt/lists/* \
     # Fail the build loudly (instead of failing at runtime) if a stale/corrupted
     # build-cache layer ever leaves odbcinst.ini pointing at a driver file that
     # doesn't actually exist on disk.
     && ls /opt/microsoft/msodbcsql18/lib64/libmsodbcsql-*.so.*
+# curl/apt-transport-https/gnupg2 are kept (not purged) so entrypoint.sh can
+# self-heal the driver install at container startup if needed - see below.
 
 WORKDIR /app
 
@@ -33,7 +34,11 @@ COPY landing_page/ landing_page/
 # Copy service account if present (optional – can be set via env var instead)
 COPY service_account.jso[n] .
 
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 EXPOSE 8000
 
+ENTRYPOINT ["/entrypoint.sh"]
 # Run with gunicorn for production
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "4", "--timeout", "300", "--graceful-timeout", "30", "--worker-tmp-dir", "/dev/shm", "app:app"]

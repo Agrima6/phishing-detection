@@ -23,7 +23,8 @@
       "Bash(grep -B1 \"^Package: msodbcsql18$\" Packages)",
       "Bash(grep -v \"^--$\")",
       "Bash(awk '/^Package: msodbcsql18$/{p=1} p&&/^Version:/{print; p=0}' Packages)",
-      "Bash(curl -fsSL \"https://packages.microsoft.com/debian/12/prod/pool/main/m/msodbcsql18/\")"
+      "Bash(curl -fsSL \"https://packages.microsoft.com/debian/12/prod/pool/main/m/msodbcsql18/\")",
+      "Bash(chmod +x /Users/agrimaagarwal/Downloads/project/entrypoint.sh)"
     ]
   }
 }
