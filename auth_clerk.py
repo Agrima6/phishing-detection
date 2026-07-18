@@ -67,10 +67,10 @@ def clerk_session():
 
     email = _primary_email(clerk_user)
     name = " ".join(filter(None, [clerk_user.first_name, clerk_user.last_name])).strip() or email
-    # Role is assigned per-user in the Clerk Dashboard under
-    # User -> Metadata -> Public: {"role": "admin"} (admin/operator/auditor/template_author).
-    # No role set = no access, so newly-created Clerk users can't self-grant permissions.
-    role = (clerk_user.public_metadata or {}).get("role")
+    # Any signed-in Clerk user gets full access by default - no per-user Dashboard
+    # step required. Set public_metadata {"role": "operator"/"auditor"/"template_author"}
+    # on a specific user in the Clerk Dashboard to give them reduced access instead.
+    role = (clerk_user.public_metadata or {}).get("role") or "admin"
 
     user_data = {"id": user_id, "name": name, "email": email, "role": role}
     session["clerk_user"] = user_data

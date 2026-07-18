@@ -40,7 +40,8 @@
       "Bash(SQLITE_DB_PATH=__TRACKED_VAR__/apptest2.db CLERK_PUBLISHABLE_KEY=pk_test_fake CLERK_SECRET_KEY=sk_test_fake SECRET_KEY=test ./.venv/bin/python3 -c ' *)",
       "Bash(rm -f __TRACKED_VAR__/apptest3.db)",
       "Bash(SQLITE_DB_PATH=__TRACKED_VAR__/apptest3.db CLERK_PUBLISHABLE_KEY=pk_test_fake CLERK_SECRET_KEY=sk_test_fake SECRET_KEY=test ./.venv/bin/python3 -c ' *)",
-      "Bash(/opt/homebrew/bin/python3 -m py_compile app.py)"
+      "Bash(/opt/homebrew/bin/python3 -m py_compile app.py)",
+      "Bash(/opt/homebrew/bin/python3 -m py_compile auth_clerk.py)"
     ]
   }
 }
