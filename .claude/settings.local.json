@@ -16,7 +16,14 @@
       "Bash(npm view *)",
       "Bash(tar xzf *)",
       "Bash(python3 -c ' *)",
-      "Bash(python3 -m py_compile app.py config.py auth_clerk.py phishing_campaign_service.py gemini_service.py)"
+      "Bash(python3 -m py_compile app.py config.py auth_clerk.py phishing_campaign_service.py gemini_service.py)",
+      "Bash(curl -fsSL https://packages.microsoft.com/debian/12/prod/dists/bookworm/main/binary-amd64/Packages.gz -o Packages.gz)",
+      "Bash(gunzip -f Packages.gz)",
+      "Bash(grep -A15 \"^Package: msodbcsql18$\" Packages)",
+      "Bash(grep -B1 \"^Package: msodbcsql18$\" Packages)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(awk '/^Package: msodbcsql18$/{p=1} p&&/^Version:/{print; p=0}' Packages)",
+      "Bash(curl -fsSL \"https://packages.microsoft.com/debian/12/prod/pool/main/m/msodbcsql18/\")"
     ]
   }
 }
