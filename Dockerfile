@@ -1,21 +1,5 @@
 FROM python:3.12-slim
 
-# Install ODBC Driver 18 for SQL Server
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       curl apt-transport-https gnupg2 \
-    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql-release.list \
-    && apt-get update \
-    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 unixodbc-dev \
-    && rm -rf /var/lib/apt/lists/* \
-    # Fail the build loudly (instead of failing at runtime) if a stale/corrupted
-    # build-cache layer ever leaves odbcinst.ini pointing at a driver file that
-    # doesn't actually exist on disk.
-    && ls /opt/microsoft/msodbcsql18/lib64/libmsodbcsql-*.so.*
-# curl/apt-transport-https/gnupg2 are kept (not purged) so entrypoint.sh can
-# self-heal the driver install at container startup if needed - see below.
-
 WORKDIR /app
 
 # Install Python dependencies
@@ -34,11 +18,10 @@ COPY landing_page/ landing_page/
 # Copy service account if present (optional – can be set via env var instead)
 COPY service_account.jso[n] .
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
 EXPOSE 8000
 
-ENTRYPOINT ["/entrypoint.sh"]
-# Run with gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "4", "--timeout", "300", "--graceful-timeout", "30", "--worker-tmp-dir", "/dev/shm", "app:app"]
+# Run with gunicorn for production. A single worker is used because the
+# SQLite backend serializes writes at the file level - multiple worker
+# processes fighting over the same DB file would just cause "database is
+# locked" errors instead of adding real concurrency.
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "300", "--graceful-timeout", "30", "--worker-tmp-dir", "/dev/shm", "app:app"]

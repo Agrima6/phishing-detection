@@ -24,7 +24,23 @@
       "Bash(grep -v \"^--$\")",
       "Bash(awk '/^Package: msodbcsql18$/{p=1} p&&/^Version:/{print; p=0}' Packages)",
       "Bash(curl -fsSL \"https://packages.microsoft.com/debian/12/prod/pool/main/m/msodbcsql18/\")",
-      "Bash(chmod +x /Users/agrimaagarwal/Downloads/project/entrypoint.sh)"
+      "Bash(chmod +x /Users/agrimaagarwal/Downloads/project/entrypoint.sh)",
+      "Bash(python3 -m py_compile phishing_campaign_service.py)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//opt/homebrew/Cellar/python@3.14/3.14.3_1/bin/**)",
+      "Bash(/opt/homebrew/bin/python3 --version)",
+      "Bash(rm -f __TRACKED_VAR__/smoketest.db)",
+      "Bash(SQLITE_DB_PATH=__TRACKED_VAR__/smoketest.db /opt/homebrew/bin/python3 -c ' *)",
+      "Bash(echo \"exit code: $?\")",
+      "Bash(rm -f __TRACKED_VAR__/apptest.db)",
+      "Bash(SQLITE_DB_PATH=__TRACKED_VAR__/apptest.db CLERK_PUBLISHABLE_KEY=pk_test_am9pbnQtZHVja2xpbmctMTguY2xlcmsuYWNjb3VudHMuZGV2JA CLERK_SECRET_KEY=sk_test_fake SECRET_KEY=test /opt/homebrew/bin/python3 -c ' *)",
+      "Bash(/Users/agrimaagarwal/Downloads/project/.venv/bin/python3 --version)",
+      "Bash(SQLITE_DB_PATH=__TRACKED_VAR__/apptest.db CLERK_PUBLISHABLE_KEY=pk_test_am9pbnQtZHVja2xpbmctMTguY2xlcmsuYWNjb3VudHMuZGV2JA CLERK_SECRET_KEY=sk_test_fake SECRET_KEY=test ./.venv/bin/python3 -c ' *)",
+      "Bash(rm -f __TRACKED_VAR__/apptest2.db)",
+      "Bash(SQLITE_DB_PATH=__TRACKED_VAR__/apptest2.db CLERK_PUBLISHABLE_KEY=pk_test_fake CLERK_SECRET_KEY=sk_test_fake SECRET_KEY=test ./.venv/bin/python3 -c ' *)",
+      "Bash(rm -f __TRACKED_VAR__/apptest3.db)",
+      "Bash(SQLITE_DB_PATH=__TRACKED_VAR__/apptest3.db CLERK_PUBLISHABLE_KEY=pk_test_fake CLERK_SECRET_KEY=sk_test_fake SECRET_KEY=test ./.venv/bin/python3 -c ' *)",
+      "Bash(/opt/homebrew/bin/python3 -m py_compile app.py)"
     ]
   }
 }

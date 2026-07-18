@@ -3,13 +3,11 @@ services:
     build: .
     ports:
       - "8000:8000"
+    volumes:
+      # Persist the SQLite database across container restarts for local dev.
+      - phishdash-data:/app/data
     environment:
       # --- Required ---
-      SQL_SERVER: "email-stimulation-prod.database.windows.net"
-      SQL_DATABASE: "phishing"
-      SQL_USERNAME: "emailprod"
-      SQL_PASSWORD: "${SQL_PASSWORD}"
-
       # Graph Email API
       GRAPH_EMAIL_API_URL: "${GRAPH_EMAIL_API_URL}"
 
@@ -29,3 +27,6 @@ services:
       # Daily email quota
       DAILY_EMAIL_LIMIT: "${DAILY_EMAIL_LIMIT:-2000}"
     restart: unless-stopped
+
+volumes:
+  phishdash-data:

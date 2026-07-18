@@ -456,20 +456,17 @@ def handle_exception(e):
 # ---------------------------------------------------------------------------
 
 _ROLE_PERMISSIONS = {
-    "user": {
-        "dashboard",
-        "view_campaigns",
-        "create_campaign",
-        "view_recipients",
-        "add_recipients",
-        "send",
-        "report",
-        "manage_users",
-    }
+    "admin":           {"dashboard", "view_campaigns", "create_campaign", "view_recipients", "add_recipients", "send", "report", "manage_users"},
+    "operator":        {"dashboard", "view_campaigns", "create_campaign", "view_recipients", "add_recipients", "send", "report"},
+    "auditor":         {"dashboard", "view_campaigns", "view_recipients", "report"},
+    "template_author": {"view_campaigns", "create_campaign"},
 }
 
 _ROLE_LABELS = {
-    "user": "User"
+    "admin": "Admin",
+    "operator": "Operator",
+    "auditor": "Auditor",
+    "template_author": "Template Author",
 }
 
 
@@ -483,25 +480,20 @@ def _get_session_info() -> dict | None:
     user = flask_session.get("clerk_user")
     if not user:
         return None
-    role = "user"
+    role = user.get("role")
     if role not in _ROLE_LABELS:
-        return {
-    "role": "user",
-    "username": user.get("name") or user.get("email", "User"),
-    "label": "User"
-}
+        return None
     return {"role": role, "username": user.get("name") or user.get("email", "Clerk User"),
             "label": _ROLE_LABELS.get(role, role)}
 
 
+def _get_role() -> str | None:
+    info = _get_session_info()
+    return info["role"] if info else None
 
 
-def _get_role():
-    return "user"
-
-
-def _can(role, permission):
-    return True
+def _can(role: str | None, permission: str) -> bool:
+    return bool(role and permission in _ROLE_PERMISSIONS.get(role, set()))
 
 
 def _json_response(data, status_code: int = 200):

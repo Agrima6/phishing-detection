@@ -57,11 +57,6 @@ class Config:
         self.PHISHING_BASE_URL = os.environ.get('PHISHING_BASE_URL', 'http://localhost:8000')
         # Optional GitHub Pages landing page URL
         self.PHISHING_GITHUB_PAGES_URL = os.environ.get('PHISHING_GITHUB_PAGES_URL', '')
-        # Azure SQL Database
-        self.SQL_SERVER   = os.environ.get('SQL_SERVER', '')
-        self.SQL_DATABASE = os.environ.get('SQL_DATABASE', '')
-        self.SQL_USERNAME = os.environ.get('SQL_USERNAME', '')
-        self.SQL_PASSWORD = os.environ.get('SQL_PASSWORD', '')
 
         # Google Gemini AI (Service Account – Vertex AI)
         self.GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '')
@@ -84,11 +79,6 @@ class Config:
             # SendGrid
             'sendgrid_from_email':  self.SENDGRID_FROM_EMAIL,
             'sendgrid_from_name':   self.SENDGRID_FROM_NAME,
-            # Azure SQL
-            'sql_server':   self.SQL_SERVER,
-            'sql_database': self.SQL_DATABASE,
-            'sql_username': self.SQL_USERNAME,
-            'sql_password': self.SQL_PASSWORD,
             # Google Gemini AI
             'google_service_account_json': self.GOOGLE_SERVICE_ACCOUNT_JSON,
             'google_genai_model':           self.GOOGLE_GENAI_MODEL,

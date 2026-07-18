@@ -16,9 +16,6 @@ google-genai>=1.5.0
 # Google Auth – Service Account credential loading
 google-auth>=2.29.0
 
-# Azure SQL (MSSQL) – production database driver
-pyodbc==5.2.0
-
 # DNS lookups – validate email domains (MX records) before sending
 dnspython==2.7.0
 

@@ -1,104 +1,52 @@
 """
-Phishing Campaign Service – Azure SQL Database
-Campaigns, recipients, and open-events are stored in Azure SQL
-(phising-nonprod.database.windows.net).
+Phishing Campaign Service – SQLite
+Campaigns, recipients, and open-events are stored in a local SQLite file.
 """
 
 import csv
-import hashlib
 import io
 import json
 import logging
 import os
 import re
 import secrets
+import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone, timedelta
-
-import pyodbc
+from datetime import datetime, timezone
+from pathlib import Path
 
 from config import config
 
 # ---------------------------------------------------------------------------
-# Azure SQL connection
+# SQLite connection
 # ---------------------------------------------------------------------------
 
 _db_lock = threading.Lock()
 _db_initialized = False
 _db_init_guard = threading.Lock()
 
-# Enable ODBC driver-level connection pooling – reuses TCP/TLS connections
-pyodbc.pooling = True
-
-_conn_str_cached: str | None = None
-
-
-def _get_odbc_driver() -> str:
-    """Return the best available MSSQL ODBC driver name."""
-    preferred = [
-        "ODBC Driver 18 for SQL Server",
-        "ODBC Driver 17 for SQL Server",
-        "ODBC Driver 13 for SQL Server",
-        "SQL Server Native Client 11.0",
-        "SQL Server",
-    ]
-    available = pyodbc.drivers()
-    for d in preferred:
-        if d in available:
-            return f"{{{d}}}"
-    raise RuntimeError(
-        f"No MSSQL ODBC driver found. Install 'ODBC Driver 18 for SQL Server' from "
-        f"https://aka.ms/odbc18 . Available drivers: {available}"
-    )
+# Overridable so a persistent disk can be mounted elsewhere in production;
+# defaults to a file next to this module. NOTE: on ephemeral filesystems
+# (e.g. Render's free tier) this file - and all data in it - is wiped on
+# every redeploy/restart.
+_DB_PATH = Path(os.environ.get("SQLITE_DB_PATH", Path(__file__).parent / "data" / "phishing.db"))
 
 
-def _get_conn() -> pyodbc.Connection:
-    """Return a pooled Azure SQL connection using config credentials."""
-    global _conn_str_cached
-    if _conn_str_cached is None:
-        server   = config.SQL_SERVER
-        database = config.SQL_DATABASE
-        username = config.SQL_USERNAME
-        password = config.SQL_PASSWORD
-        driver   = _get_odbc_driver()
-        is_legacy = "ODBC Driver" not in driver
-        # Local dev override: self-signed certs (e.g. a local SQL Server container) need
-        # TrustServerCertificate=yes. Never set this against a real Azure SQL server.
-        trust_cert = os.environ.get("SQL_TRUST_SERVER_CERT", "no").lower() == "yes"
-        enc_opts = f"Encrypt=yes;TrustServerCertificate={'yes' if (is_legacy or trust_cert) else 'no'};"
-        auth_opts = "" if is_legacy else "Authentication=SqlPassword;"
-        _conn_str_cached = (
-            f"DRIVER={driver};"
-            f"SERVER={server};"
-            f"DATABASE={database};"
-            f"UID={username};"
-            f"PWD={password};"
-            f"{enc_opts}"
-            f"{auth_opts}"
-            "Connection Timeout=30;"
-        )
-    return pyodbc.connect(_conn_str_cached, autocommit=False)
+def _get_conn() -> sqlite3.Connection:
+    """Return a SQLite connection to the local database file."""
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(_DB_PATH), timeout=30, check_same_thread=False)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
-    if salt is None:
-        salt = secrets.token_hex(16)
-    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100_000)
-    return key.hex(), salt
-
-
-def _verify_password(password: str, stored_hash: str, salt: str) -> bool:
-    computed, _ = _hash_password(password, salt)
-    return secrets.compare_digest(computed, stored_hash)
-
-
 def _row_to_dict(cursor, row) -> dict:
-    """Convert pyodbc row to dict using column names from cursor description."""
+    """Convert a sqlite3 row to a dict using column names from cursor description."""
     return {col[0]: val for col, val in zip(cursor.description, row)}
 
 
@@ -115,8 +63,7 @@ def _fetchall_dict(cursor) -> list[dict]:
 
 
 def _is_duplicate_key_error(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return ("2627" in msg) or ("2601" in msg) or ("duplicate key" in msg) or ("unique key" in msg)
+    return isinstance(exc, sqlite3.IntegrityError) or "unique constraint" in str(exc).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -127,113 +74,68 @@ def _init_db():
     """Create tables if they don't already exist (idempotent)."""
     ddl_statements = [
         """
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'campaigns')
-        CREATE TABLE campaigns (
-            id               NVARCHAR(36)  NOT NULL PRIMARY KEY,
-            name             NVARCHAR(255) NOT NULL,
-            subject          NVARCHAR(500) NOT NULL,
-            body_html        NVARCHAR(MAX) NOT NULL,
-            sender_name      NVARCHAR(255) NOT NULL DEFAULT 'Security Team',
-            redirect_url     NVARCHAR(500) NOT NULL DEFAULT '',
-            status           NVARCHAR(50)  NOT NULL DEFAULT 'draft',
-            created_at       NVARCHAR(50)  NOT NULL,
-            updated_at       NVARCHAR(50)  NOT NULL,
-            total_sent       INT           NOT NULL DEFAULT 0,
-            total_opened     INT           NOT NULL DEFAULT 0,
-            total_clicked    INT           NOT NULL DEFAULT 0,
-            total_failed     INT           NOT NULL DEFAULT 0,
-            total_duplicates INT           NOT NULL DEFAULT 0
+        CREATE TABLE IF NOT EXISTS campaigns (
+            id               TEXT    NOT NULL PRIMARY KEY,
+            name             TEXT    NOT NULL,
+            subject          TEXT    NOT NULL,
+            body_html        TEXT    NOT NULL,
+            sender_name      TEXT    NOT NULL DEFAULT 'Security Team',
+            redirect_url     TEXT    NOT NULL DEFAULT '',
+            status           TEXT    NOT NULL DEFAULT 'draft',
+            created_at       TEXT    NOT NULL,
+            updated_at       TEXT    NOT NULL,
+            total_sent       INTEGER NOT NULL DEFAULT 0,
+            total_opened     INTEGER NOT NULL DEFAULT 0,
+            total_clicked    INTEGER NOT NULL DEFAULT 0,
+            total_failed     INTEGER NOT NULL DEFAULT 0,
+            total_duplicates INTEGER NOT NULL DEFAULT 0
         )
         """,
         """
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'recipients')
-        CREATE TABLE recipients (
-            id             NVARCHAR(36)  NOT NULL PRIMARY KEY,
-            campaign_id    NVARCHAR(36)  NOT NULL,
-            email          NVARCHAR(255) NOT NULL,
-            name           NVARCHAR(255) NOT NULL,
-            tracking_token NVARCHAR(100) NOT NULL UNIQUE,
-            status         NVARCHAR(50)  NOT NULL DEFAULT 'pending',
-            sent_at        NVARCHAR(50)  NULL,
-            opened_at      NVARCHAR(50)  NULL,
-            open_count     INT           NOT NULL DEFAULT 0,
-            click_count    INT           NOT NULL DEFAULT 0,
-            clicked_at     NVARCHAR(50)  NULL,
-            failed_at      NVARCHAR(50)  NULL,
-            fail_reason    NVARCHAR(500) NULL,
-            send_count     INT           NOT NULL DEFAULT 0,
-            created_at     NVARCHAR(50)  NOT NULL,
-            CONSTRAINT UQ_recipients_campaign_email UNIQUE (campaign_id, email)
+        CREATE TABLE IF NOT EXISTS recipients (
+            id             TEXT    NOT NULL PRIMARY KEY,
+            campaign_id    TEXT    NOT NULL,
+            email          TEXT    NOT NULL,
+            name           TEXT    NOT NULL,
+            tracking_token TEXT    NOT NULL UNIQUE,
+            status         TEXT    NOT NULL DEFAULT 'pending',
+            sent_at        TEXT,
+            opened_at      TEXT,
+            open_count     INTEGER NOT NULL DEFAULT 0,
+            click_count    INTEGER NOT NULL DEFAULT 0,
+            clicked_at     TEXT,
+            failed_at      TEXT,
+            fail_reason    TEXT,
+            send_count     INTEGER NOT NULL DEFAULT 0,
+            created_at     TEXT    NOT NULL,
+            UNIQUE (campaign_id, email)
         )
         """,
         """
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'events')
-        CREATE TABLE events (
-            id          NVARCHAR(36)  NOT NULL PRIMARY KEY,
-            campaign_id NVARCHAR(36)  NOT NULL,
-            email       NVARCHAR(255) NOT NULL,
-            event_type  NVARCHAR(50)  NOT NULL,
-            token       NVARCHAR(100) NOT NULL,
-            occurred_at NVARCHAR(50)  NOT NULL
-        )
-        """,
-        """
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'users')
-        CREATE TABLE users (
-            id            NVARCHAR(36)  NOT NULL PRIMARY KEY,
-            username      NVARCHAR(255) NOT NULL UNIQUE,
-            password_hash NVARCHAR(255) NOT NULL,
-            salt          NVARCHAR(64)  NOT NULL,
-            role          NVARCHAR(50)  NOT NULL DEFAULT 'auditor',
-            created_by    NVARCHAR(255) NOT NULL DEFAULT 'system',
-            created_at    NVARCHAR(50)  NOT NULL,
-            is_active     INT           NOT NULL DEFAULT 1
-        )
-        """,
-        """
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'sessions')
-        CREATE TABLE sessions (
-            token       NVARCHAR(100) NOT NULL PRIMARY KEY,
-            user_id     NVARCHAR(36)  NOT NULL,
-            username    NVARCHAR(255) NOT NULL,
-            role        NVARCHAR(50)  NOT NULL,
-            created_at  NVARCHAR(50)  NOT NULL,
-            expires_at  NVARCHAR(50)  NOT NULL
+        CREATE TABLE IF NOT EXISTS events (
+            id          TEXT NOT NULL PRIMARY KEY,
+            campaign_id TEXT NOT NULL,
+            email       TEXT NOT NULL,
+            event_type  TEXT NOT NULL,
+            token       TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
         )
         """,
     ]
     # Indexes for performance – idempotent (IF NOT EXISTS)
     index_statements = [
-        # recipients: fast lookup by campaign_id (list_recipients, dashboard stats, delete)
-        """IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_recipients_campaign_id' AND object_id = OBJECT_ID('recipients'))
-           CREATE NONCLUSTERED INDEX IX_recipients_campaign_id ON recipients (campaign_id) INCLUDE (status, click_count)""",
-        # recipients: fast lookup by campaign + status (dashboard COUNT queries)
-        """IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_recipients_campaign_status' AND object_id = OBJECT_ID('recipients'))
-           CREATE NONCLUSTERED INDEX IX_recipients_campaign_status ON recipients (campaign_id, status)""",
-        # events: fast lookup/delete by campaign_id
-        """IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_events_campaign_id' AND object_id = OBJECT_ID('events'))
-           CREATE NONCLUSTERED INDEX IX_events_campaign_id ON events (campaign_id)""",
-        # events: fast delete by token
-        """IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_events_token' AND object_id = OBJECT_ID('events'))
-           CREATE NONCLUSTERED INDEX IX_events_token ON events (token)""",
-        # events: fast delete by campaign + event_type (clear_failed_recipients)
-        """IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_events_campaign_type' AND object_id = OBJECT_ID('events'))
-           CREATE NONCLUSTERED INDEX IX_events_campaign_type ON events (campaign_id, event_type)""",
-        # users: fast lookup by username + is_active (authenticate_user)
-        """IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_users_username_active' AND object_id = OBJECT_ID('users'))
-           CREATE NONCLUSTERED INDEX IX_users_username_active ON users (username, is_active)""",
+        "CREATE INDEX IF NOT EXISTS IX_recipients_campaign_id ON recipients (campaign_id)",
+        "CREATE INDEX IF NOT EXISTS IX_recipients_campaign_status ON recipients (campaign_id, status)",
+        "CREATE INDEX IF NOT EXISTS IX_events_campaign_id ON events (campaign_id)",
+        "CREATE INDEX IF NOT EXISTS IX_events_token ON events (token)",
+        "CREATE INDEX IF NOT EXISTS IX_events_campaign_type ON events (campaign_id, event_type)",
     ]
 
-    # Online schema upgrades for recipient device metadata (idempotent)
-    alter_statements = [
-        """IF COL_LENGTH('recipients', 'opened_device_type') IS NULL ALTER TABLE recipients ADD opened_device_type NVARCHAR(30) NULL""",
-        """IF COL_LENGTH('recipients', 'opened_os') IS NULL ALTER TABLE recipients ADD opened_os NVARCHAR(30) NULL""",
-        """IF COL_LENGTH('recipients', 'opened_ip') IS NULL ALTER TABLE recipients ADD opened_ip NVARCHAR(64) NULL""",
-        """IF COL_LENGTH('recipients', 'opened_ua') IS NULL ALTER TABLE recipients ADD opened_ua NVARCHAR(300) NULL""",
-        """IF COL_LENGTH('recipients', 'clicked_device_type') IS NULL ALTER TABLE recipients ADD clicked_device_type NVARCHAR(30) NULL""",
-        """IF COL_LENGTH('recipients', 'clicked_os') IS NULL ALTER TABLE recipients ADD clicked_os NVARCHAR(30) NULL""",
-        """IF COL_LENGTH('recipients', 'clicked_ip') IS NULL ALTER TABLE recipients ADD clicked_ip NVARCHAR(64) NULL""",
-        """IF COL_LENGTH('recipients', 'clicked_ua') IS NULL ALTER TABLE recipients ADD clicked_ua NVARCHAR(300) NULL""",
+    # Online schema upgrades for recipient device metadata (idempotent).
+    # SQLite has no "ADD COLUMN IF NOT EXISTS", so check PRAGMA table_info first.
+    device_columns = [
+        "opened_device_type", "opened_os", "opened_ip", "opened_ua",
+        "clicked_device_type", "clicked_os", "clicked_ip", "clicked_ua",
     ]
 
     with _db_lock:
@@ -241,34 +143,15 @@ def _init_db():
         cursor = conn.cursor()
         for ddl in ddl_statements:
             cursor.execute(ddl)
-        for alter in alter_statements:
-            cursor.execute(alter)
+        existing_cols = {row[1] for row in cursor.execute("PRAGMA table_info(recipients)").fetchall()}
+        for col in device_columns:
+            if col not in existing_cols:
+                cursor.execute(f"ALTER TABLE recipients ADD COLUMN {col} TEXT")
         for idx in index_statements:
             cursor.execute(idx)
         conn.commit()
         conn.close()
-    logging.info("Azure SQL schema initialised.")
-
-
-def _seed_default_admin():
-    """Create the initial admin user if no users exist yet."""
-    username = getattr(config, 'PHISHING_ADMIN_USERNAME', None) or 'admin'
-    password = getattr(config, 'PHISHING_ADMIN_PASSWORD', None) or 'Admin@123'
-    with _db_lock:
-        conn = _get_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM users")
-        count = cursor.fetchone()[0]
-        if count == 0:
-            password_hash, salt = _hash_password(password)
-            cursor.execute(
-                """INSERT INTO users (id, username, password_hash, salt, role, created_by, created_at, is_active)
-                   VALUES (?, ?, ?, ?, 'admin', 'system', ?, 1)""",
-                (str(uuid.uuid4()), username, password_hash, salt, _utcnow_iso()),
-            )
-            conn.commit()
-            logging.info(f"\U0001f510 Default admin user '{username}' created in Azure SQL.")
-        conn.close()
+    logging.info(f"SQLite schema initialised at {_DB_PATH}.")
 
 
 # DB is initialised lazily on first use – not at import time.
@@ -283,12 +166,11 @@ def _ensure_db_ready():
         if _db_initialized:
             return
         _init_db()
-        _seed_default_admin()
         _db_initialized = True
 
 
 class PhishingCampaignService:
-    """Service layer for the phishing-awareness dashboard (Azure SQL backend)."""
+    """Service layer for the phishing-awareness dashboard (SQLite backend)."""
 
     def __init__(self):
         _ensure_db_ready()  # lazy init – safe to call multiple times
@@ -377,12 +259,11 @@ class PhishingCampaignService:
     def add_recipients(self, campaign_id: str, recipients: list[dict]) -> list[dict]:
         """Bulk-insert recipients.
 
-        For large lists (e.g. 4,500 entries) the previous per-row SELECT+INSERT
-        loop did 9,000+ WAN round-trips to Azure SQL and routinely exceeded the
-        gunicorn worker timeout. This implementation:
+        For large lists (e.g. 4,500 entries) a naive per-row SELECT+INSERT loop
+        does 9,000+ round-trips and can exceed the gunicorn worker timeout.
+        This implementation:
           1. Issues ONE batched SELECT to find which emails already exist.
-          2. Issues ONE executemany INSERT for all new rows (fast_executemany
-             where supported – ODBC Driver 18 ships it).
+          2. Issues ONE executemany INSERT for all new rows.
           3. Falls back to a per-row insert only on the rare unique-constraint
              race so a single bad row never aborts the whole batch.
 
@@ -409,7 +290,7 @@ class PhishingCampaignService:
         cursor = conn.cursor()
         try:
             # ---- Step 1: batched existence check ----
-            # SQL Server caps parameter count at ~2100 per query; chunk to 500.
+            # Chunk to keep well under SQLite's bound-parameter limit per query.
             existing_by_email: dict[str, dict] = {}
             CHUNK = 500
             emails = [r["email"] for r in normalized]
@@ -446,12 +327,8 @@ class PhishingCampaignService:
                     "created_at": now,
                 })
 
-            # ---- Step 3: batched INSERT via fast_executemany ----
+            # ---- Step 3: batched INSERT via executemany ----
             if new_rows:
-                try:
-                    cursor.fast_executemany = True
-                except Exception:
-                    pass  # not all drivers support it; falls back to regular executemany
                 insert_sql = """
                     INSERT INTO recipients
                       (id, campaign_id, email, name, tracking_token, status,
@@ -475,7 +352,6 @@ class PhishingCampaignService:
                     # our SELECT and INSERT. Retry the remaining rows one-by-one
                     # so a single duplicate doesn't lose the whole batch.
                     conn.rollback()
-                    cursor.fast_executemany = False
                     for row in new_rows:
                         try:
                             cursor.execute(insert_sql,
@@ -876,128 +752,4 @@ class PhishingCampaignService:
             "click_by_device": click_by_device,
             "click_by_os": click_by_os,
         }
-
-    # ------------------------------------------------------------------
-    # User management
-    # ------------------------------------------------------------------
-
-    def create_user(self, username: str, password: str, role: str, created_by: str) -> dict:
-        user_id = str(uuid.uuid4())
-        now = _utcnow_iso()
-        password_hash, salt = _hash_password(password)
-        with _db_lock:
-            conn = _get_conn()
-            cursor = conn.cursor()
-            cursor.execute(
-                """INSERT INTO users (id, username, password_hash, salt, role, created_by, created_at, is_active)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 1)""",
-                (user_id, username.strip(), password_hash, salt, role, created_by, now),
-            )
-            conn.commit()
-            conn.close()
-        logging.info(f"\U0001f464 User created: {username} (role={role}, by={created_by})")
-        return {"id": user_id, "username": username.strip(), "role": role,
-                "created_by": created_by, "created_at": now, "is_active": 1}
-
-    def list_users(self) -> list:
-        conn = _get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, username, role, created_by, created_at, is_active FROM users ORDER BY created_at DESC"
-        )
-        rows = _fetchall_dict(cursor)
-        conn.close()
-        return rows
-
-    def delete_user(self, user_id: str) -> bool:
-        with _db_lock:
-            conn = _get_conn()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
-            affected = cursor.rowcount
-            conn.commit()
-            conn.close()
-        return affected > 0
-
-    def update_user_role(self, user_id: str, role: str) -> bool:
-        with _db_lock:
-            conn = _get_conn()
-            cursor = conn.cursor()
-            cursor.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
-            affected = cursor.rowcount
-            conn.commit()
-            conn.close()
-        return affected > 0
-
-    def reset_user_password(self, user_id: str, new_password: str) -> bool:
-        password_hash, salt = _hash_password(new_password)
-        with _db_lock:
-            conn = _get_conn()
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE users SET password_hash = ?, salt = ? WHERE id = ?",
-                (password_hash, salt, user_id),
-            )
-            affected = cursor.rowcount
-            conn.commit()
-            conn.close()
-        return affected > 0
-
-    def authenticate_user(self, username: str, password: str) -> dict | None:
-        conn = _get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM users WHERE username = ? AND is_active = 1",
-            (username.strip(),),
-        )
-        row = _fetchone_dict(cursor)
-        conn.close()
-        if not row:
-            return None
-        if not _verify_password(password, row["password_hash"], row["salt"]):
-            return None
-        return {"id": row["id"], "username": row["username"], "role": row["role"]}
-
-    def create_session(self, user_id: str, username: str, role: str) -> str:
-        token = secrets.token_urlsafe(32)
-        now = datetime.now(timezone.utc)
-        expires = now + timedelta(hours=8)
-        with _db_lock:
-            conn = _get_conn()
-            cursor = conn.cursor()
-            cursor.execute(
-                """INSERT INTO sessions (token, user_id, username, role, created_at, expires_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (token, user_id, username, role, now.isoformat(), expires.isoformat()),
-            )
-            conn.commit()
-            conn.close()
-        return token
-
-    def validate_session(self, token: str) -> dict | None:
-        if not token:
-            return None
-        conn = _get_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sessions WHERE token = ?", (token,))
-        row = _fetchone_dict(cursor)
-        conn.close()
-        if not row:
-            return None
-        try:
-            expires = datetime.fromisoformat(row["expires_at"])
-            if datetime.now(timezone.utc) > expires:
-                self.revoke_session(token)
-                return None
-        except (ValueError, TypeError):
-            return None
-        return {"role": row["role"], "username": row["username"], "user_id": row["user_id"]}
-
-    def revoke_session(self, token: str) -> None:
-        with _db_lock:
-            conn = _get_conn()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM sessions WHERE token = ?", (token,))
-            conn.commit()
-            conn.close()
 
