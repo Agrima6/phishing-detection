@@ -1023,19 +1023,37 @@ function initClerkAuth() {
     _clerkErr('Clerk is not configured. Set CLERK_PUBLISHABLE_KEY and CLERK_SECRET_KEY.');
     return;
   }
-  window.addEventListener('load', async () => {
-    if (!window.Clerk) { _clerkErr('Failed to load Clerk. Check your network connection and CLERK_PUBLISHABLE_KEY.'); return; }
-    try {
-      await Clerk.load();
-    } catch (ex) { _clerkErr(ex.message); return; }
-    if (Clerk.user) {
-      syncClerkSession();
-    } else {
-      Clerk.mountSignIn(document.getElementById('clerk-sign-in'));
+  const mountEl = document.getElementById('clerk-sign-in');
+  if (mountEl) mountEl.innerHTML = '<div style="text-align:center;padding:24px 0;color:var(--muted);font-size:.85rem">Loading sign-in…</div>';
+
+  // Poll for window.Clerk directly instead of waiting on the page's `load` event –
+  // `load` doesn't fire until every script on the page finishes, including large,
+  // unrelated libraries (chart.js, xlsx) that can lag well behind Clerk itself,
+  // especially right after a cold start.
+  const startedAt = Date.now();
+  (function waitForClerk() {
+    if (window.Clerk) { _onClerkScriptReady(); return; }
+    if (Date.now() - startedAt > 15000) {
+      _clerkErr('Failed to load Clerk. Check your network connection and CLERK_PUBLISHABLE_KEY.');
+      return;
     }
-    Clerk.addListener(({ user }) => {
-      if (user && SESSION_TOKEN !== 'clerk') syncClerkSession();
-    });
+    setTimeout(waitForClerk, 100);
+  })();
+}
+
+async function _onClerkScriptReady() {
+  try {
+    await Clerk.load();
+  } catch (ex) { _clerkErr(ex.message); return; }
+  if (Clerk.user) {
+    syncClerkSession();
+  } else {
+    const mountEl = document.getElementById('clerk-sign-in');
+    if (mountEl) mountEl.innerHTML = '';
+    Clerk.mountSignIn(mountEl);
+  }
+  Clerk.addListener(({ user }) => {
+    if (user && SESSION_TOKEN !== 'clerk') syncClerkSession();
   });
 }
 
