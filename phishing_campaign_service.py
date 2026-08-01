@@ -1,6 +1,8 @@
 """
-Phishing Campaign Service – SQLite
-Campaigns, recipients, and open-events are stored in a local SQLite file.
+Phishing Campaign Service – SQLite (local dev) / Postgres (production)
+Campaigns, recipients, and open-events are stored either in a local SQLite
+file or, when DATABASE_URL is set, a real Postgres database so data survives
+restarts on hosts without persistent disks (e.g. Render's free tier).
 """
 
 import csv
@@ -16,25 +18,72 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import psycopg2
+    import psycopg2.errors
+except ImportError:
+    psycopg2 = None
+
 from config import config
 
 # ---------------------------------------------------------------------------
-# SQLite connection
+# Database connection
 # ---------------------------------------------------------------------------
 
 _db_lock = threading.Lock()
 _db_initialized = False
 _db_init_guard = threading.Lock()
 
+# When set, all data lives in this Postgres database instead of local SQLite.
+_DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
 # Overridable so a persistent disk can be mounted elsewhere in production;
-# defaults to a file next to this module. NOTE: on ephemeral filesystems
-# (e.g. Render's free tier) this file - and all data in it - is wiped on
-# every redeploy/restart.
+# defaults to a file next to this module. Only used when DATABASE_URL isn't
+# set. NOTE: on ephemeral filesystems (e.g. Render's free tier) this file -
+# and all data in it - is wiped on every redeploy/restart.
 _DB_PATH = Path(os.environ.get("SQLITE_DB_PATH", Path(__file__).parent / "data" / "phishing.db"))
 
 
-def _get_conn() -> sqlite3.Connection:
-    """Return a SQLite connection to the local database file."""
+def _using_postgres() -> bool:
+    return bool(_DATABASE_URL)
+
+
+class _PGCursorProxy:
+    """Translates SQLite-style `?` placeholders to psycopg2-style `%s` so
+    every existing call site works unmodified against Postgres."""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def execute(self, sql, params=()):
+        return self._cursor.execute(sql.replace("?", "%s"), params)
+
+    def executemany(self, sql, seq_of_params):
+        return self._cursor.executemany(sql.replace("?", "%s"), seq_of_params)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class _PGConnProxy:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return _PGCursorProxy(self._conn.cursor())
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def _get_conn():
+    """Return a DB connection - Postgres if DATABASE_URL is set (production),
+    otherwise a local SQLite file (local dev)."""
+    if _using_postgres():
+        if psycopg2 is None:
+            raise RuntimeError("DATABASE_URL is set but psycopg2 is not installed.")
+        raw = psycopg2.connect(_DATABASE_URL)
+        return _PGConnProxy(raw)
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(_DB_PATH), timeout=30, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON")
@@ -46,7 +95,9 @@ def _utcnow_iso() -> str:
 
 
 def _row_to_dict(cursor, row) -> dict:
-    """Convert a sqlite3 row to a dict using column names from cursor description."""
+    """Convert a DB row to a dict using column names from cursor description
+    (the DB-API 2.0 `.description` format is identical for sqlite3 and
+    psycopg2, so this works unmodified against either)."""
     return {col[0]: val for col, val in zip(cursor.description, row)}
 
 
@@ -62,8 +113,24 @@ def _fetchall_dict(cursor) -> list[dict]:
     return [_row_to_dict(cursor, r) for r in rows]
 
 
+def _table_columns(cursor, table_name: str) -> set:
+    """Column names for a table - used by the idempotent schema-upgrade
+    checks below, since SQLite and Postgres each need a different query."""
+    if _using_postgres():
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+            (table_name,),
+        )
+        return {row[0] for row in cursor.fetchall()}
+    return {row[1] for row in cursor.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
 def _is_duplicate_key_error(exc: Exception) -> bool:
-    return isinstance(exc, sqlite3.IntegrityError) or "unique constraint" in str(exc).lower()
+    if isinstance(exc, sqlite3.IntegrityError):
+        return True
+    if psycopg2 is not None and isinstance(exc, psycopg2.errors.UniqueViolation):
+        return True
+    return "unique constraint" in str(exc).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -143,11 +210,11 @@ def _init_db():
         cursor = conn.cursor()
         for ddl in ddl_statements:
             cursor.execute(ddl)
-        existing_cols = {row[1] for row in cursor.execute("PRAGMA table_info(recipients)").fetchall()}
+        existing_cols = _table_columns(cursor, "recipients")
         for col in device_columns:
             if col not in existing_cols:
                 cursor.execute(f"ALTER TABLE recipients ADD COLUMN {col} TEXT")
-        existing_campaign_cols = {row[1] for row in cursor.execute("PRAGMA table_info(campaigns)").fetchall()}
+        existing_campaign_cols = _table_columns(cursor, "campaigns")
         if "email_config_id" not in existing_campaign_cols:
             cursor.execute("ALTER TABLE campaigns ADD COLUMN email_config_id TEXT")
         for idx in index_statements:
