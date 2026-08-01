@@ -11,6 +11,7 @@ COPY config.py .
 COPY app.py .
 COPY auth_clerk.py .
 COPY phishing_campaign_service.py .
+COPY tenant_service.py .
 COPY gemini_service.py .
 COPY static/ static/
 COPY landing_page/ landing_page/
@@ -24,4 +25,6 @@ EXPOSE 8000
 # SQLite backend serializes writes at the file level - multiple worker
 # processes fighting over the same DB file would just cause "database is
 # locked" errors instead of adding real concurrency.
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "300", "--graceful-timeout", "30", "--worker-tmp-dir", "/dev/shm", "app:app"]
+# Shell form (not exec-array) so $PORT expands - hosts like Render assign
+# their own port at runtime and expect the container to bind to it.
+CMD gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 300 --graceful-timeout 30 --worker-tmp-dir /dev/shm app:app

@@ -147,6 +147,9 @@ def _init_db():
         for col in device_columns:
             if col not in existing_cols:
                 cursor.execute(f"ALTER TABLE recipients ADD COLUMN {col} TEXT")
+        existing_campaign_cols = {row[1] for row in cursor.execute("PRAGMA table_info(campaigns)").fetchall()}
+        if "email_config_id" not in existing_campaign_cols:
+            cursor.execute("ALTER TABLE campaigns ADD COLUMN email_config_id TEXT")
         for idx in index_statements:
             cursor.execute(idx)
         conn.commit()
@@ -183,13 +186,14 @@ class PhishingCampaignService:
 
     def create_campaign(self, name: str, subject: str, body_html: str,
                         sender_name: str = "Security Team",
-                        redirect_url: str = "") -> dict:
+                        redirect_url: str = "",
+                        email_config_id: str | None = None) -> dict:
         campaign_id = str(uuid.uuid4())
         now = _utcnow_iso()
         row = {
             "id": campaign_id, "name": name, "subject": subject,
             "body_html": body_html, "sender_name": sender_name,
-            "redirect_url": redirect_url,
+            "redirect_url": redirect_url, "email_config_id": email_config_id,
             "status": "draft", "created_at": now, "updated_at": now,
             "total_sent": 0, "total_opened": 0, "total_clicked": 0,
             "total_failed": 0, "total_duplicates": 0,
@@ -199,12 +203,12 @@ class PhishingCampaignService:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO campaigns
-                  (id, name, subject, body_html, sender_name, redirect_url, status,
+                  (id, name, subject, body_html, sender_name, redirect_url, email_config_id, status,
                    created_at, updated_at, total_sent, total_opened, total_clicked,
                    total_failed, total_duplicates)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (row["id"], row["name"], row["subject"], row["body_html"],
-                  row["sender_name"], row["redirect_url"], row["status"],
+                  row["sender_name"], row["redirect_url"], row["email_config_id"], row["status"],
                   row["created_at"], row["updated_at"], 0, 0, 0, 0, 0))
             conn.commit()
             conn.close()
@@ -236,11 +240,11 @@ class PhishingCampaignService:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE campaigns
-                SET total_sent       = total_sent       + ?,
-                    total_opened     = total_opened     + ?,
-                    total_clicked    = total_clicked    + ?,
-                    total_failed     = total_failed     + ?,
-                    total_duplicates = total_duplicates + ?,
+                SET total_sent       = MAX(0, total_sent       + ?),
+                    total_opened     = MAX(0, total_opened     + ?),
+                    total_clicked    = MAX(0, total_clicked    + ?),
+                    total_failed     = MAX(0, total_failed     + ?),
+                    total_duplicates = MAX(0, total_duplicates + ?),
                     updated_at       = ?,
                     status = CASE
                         WHEN status = 'draft' AND ? > 0 THEN 'active'
@@ -387,14 +391,22 @@ class PhishingCampaignService:
         with _db_lock:
             conn = _get_conn()
             cursor = conn.cursor()
-            cursor.execute("SELECT tracking_token FROM recipients WHERE id = ?", (recipient_id,))
-            rec = cursor.fetchone()
+            cursor.execute("SELECT * FROM recipients WHERE id = ?", (recipient_id,))
+            rec = _fetchone_dict(cursor)
             if rec:
-                cursor.execute("DELETE FROM events WHERE token = ?", (rec[0],))
+                cursor.execute("DELETE FROM events WHERE token = ?", (rec["tracking_token"],))
             cursor.execute("DELETE FROM recipients WHERE id = ?", (recipient_id,))
             affected = cursor.rowcount
             conn.commit()
             conn.close()
+        if rec and affected:
+            self.update_campaign_stats(
+                rec["campaign_id"],
+                sent_delta=-1 if rec["status"] in ("sent", "opened", "failed") else 0,
+                opened_delta=-1 if rec["status"] == "opened" else 0,
+                clicked_delta=-1 if (rec.get("click_count") or 0) > 0 else 0,
+                failed_delta=-1 if rec["status"] == "failed" else 0,
+            )
         return affected > 0
 
     def reset_for_resend(self, campaign_id: str) -> int:

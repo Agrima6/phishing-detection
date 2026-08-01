@@ -43,6 +43,7 @@ from gemini_service import (
 
 from config import config
 from phishing_campaign_service import PhishingCampaignService
+from tenant_service import TenantService
 from auth_clerk import auth_clerk_bp, is_clerk_configured
 
 # ---------------------------------------------------------------------------
@@ -52,6 +53,15 @@ from auth_clerk import auth_clerk_bp, is_clerk_configured
 app = Flask(__name__, static_folder="static")
 app.secret_key = config.SECRET_KEY
 
+# Render sets RENDER=true in every service's environment automatically. In that
+# environment the frontend (Vercel) and backend (Render) are different domains,
+# so the session cookie must be SameSite=None + Secure or browsers will drop it
+# on every cross-origin request. Locally (plain HTTP, same-origin dev) neither
+# is needed or possible.
+if os.environ.get("RENDER"):
+    app.config["SESSION_COOKIE_SAMESITE"] = "None"
+    app.config["SESSION_COOKIE_SECURE"] = True
+
 # Register Clerk authentication blueprint
 app.register_blueprint(auth_clerk_bp)
 
@@ -59,25 +69,87 @@ logging.basicConfig(level=logging.INFO)
 
 _sendgrid_client = SendGridAPIClient(config.SENDGRID_API_KEY) if config.SENDGRID_API_KEY else None
 
-# Ensure uploads directory exists at startup
-_UPLOADS_DIR = Path(__file__).parent / "static" / "uploads"
+# Ensure uploads directory exists at startup. Overridable via env var so
+# uploads can live on a persistent disk in production (the container
+# filesystem otherwise resets on every deploy/restart).
+_UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", Path(__file__).parent / "static" / "uploads"))
 _UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.route("/static/uploads/<path:filename>")
+def serve_upload(filename):
+    """Explicit route so uploads still serve correctly when UPLOADS_DIR is
+    redirected to a persistent disk outside the app's static/ folder."""
+    return send_from_directory(_UPLOADS_DIR, filename)
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _send_via_sendgrid(to_email: str, subject: str, body_html: str, sender_display_name: str) -> None:
+def _default_email_config() -> dict:
+    """The global .env-configured provider — today's (only) behavior, used
+    whenever a campaign has no email_config_id or the id can't be found."""
+    return {
+        "provider": config.EMAIL_PROVIDER,
+        "smtp_host": config.SMTP_HOST, "smtp_port": config.SMTP_PORT,
+        "smtp_use_ssl": config.SMTP_USE_SSL,
+        "smtp_username": config.SMTP_USERNAME, "smtp_password": config.SMTP_PASSWORD,
+        "smtp_from_email": config.SMTP_FROM_EMAIL, "smtp_from_name": config.SMTP_FROM_NAME,
+        "sendgrid_api_key": config.SENDGRID_API_KEY,
+        "sendgrid_from_email": config.SENDGRID_FROM_EMAIL, "sendgrid_from_name": config.SENDGRID_FROM_NAME,
+    }
+
+
+def _resolve_email_config(email_config_id: str | None) -> dict:
+    """Resolve which sender profile a campaign should send through.
+
+    Falls back to the global .env config when no profile is selected, the
+    referenced profile was deleted, or the tenant settings can't be read —
+    a campaign should never fail to send just because of a profile lookup.
+    """
+    cfg = _default_email_config()
+    if not email_config_id:
+        return cfg
+    try:
+        raw = TenantService().get_settings_raw()
+        match = next((c for c in raw["email_configs"] if c.get("id") == email_config_id), None)
+        if not match:
+            logging.warning(f"email_config_id {email_config_id} not found – using default gateway")
+            return cfg
+        cfg["provider"] = match.get("provider", cfg["provider"])
+        if cfg["provider"] == "sendgrid":
+            cfg["sendgrid_api_key"] = match.get("sendgrid_api_key") or cfg["sendgrid_api_key"]
+            cfg["sendgrid_from_email"] = match.get("sendgrid_from_email") or cfg["sendgrid_from_email"]
+            cfg["sendgrid_from_name"] = match.get("sendgrid_from_name") or cfg["sendgrid_from_name"]
+        else:
+            cfg["smtp_host"] = match.get("smtp_host") or cfg["smtp_host"]
+            cfg["smtp_port"] = int(match.get("smtp_port") or cfg["smtp_port"])
+            cfg["smtp_use_ssl"] = cfg["smtp_port"] == 465
+            cfg["smtp_username"] = match.get("smtp_username") or cfg["smtp_username"]
+            cfg["smtp_password"] = match.get("smtp_password") or cfg["smtp_password"]
+            cfg["smtp_from_email"] = match.get("smtp_from_email") or cfg["smtp_from_email"]
+            cfg["smtp_from_name"] = match.get("smtp_from_name") or cfg["smtp_from_name"]
+    except Exception as exc:
+        logging.error(f"Email config resolution failed for {email_config_id}: {exc}", exc_info=True)
+    return cfg
+
+
+def _send_via_sendgrid(to_email: str, subject: str, body_html: str, sender_display_name: str,
+                       cfg: dict) -> None:
     """Send via SendGrid HTTP API (port 443 – firewall-safe)."""
     message = Mail(
-        from_email=From(config.SENDGRID_FROM_EMAIL, sender_display_name),
+        from_email=From(cfg["sendgrid_from_email"], sender_display_name),
         to_emails=To(to_email),
         subject=Subject(subject),
         html_content=HtmlContent(body_html),
     )
-    if _sendgrid_client is None:
+    api_key = cfg["sendgrid_api_key"]
+    if not api_key:
         raise RuntimeError("SendGrid is not configured (missing SENDGRID_API_KEY)")
-    response = _sendgrid_client.send(message)
+    client = SendGridAPIClient(api_key) if api_key != config.SENDGRID_API_KEY else _sendgrid_client
+    if client is None:
+        raise RuntimeError("SendGrid is not configured (missing SENDGRID_API_KEY)")
+    response = client.send(message)
     if response.status_code >= 400:
         raise RuntimeError(f"SendGrid error {response.status_code}: {response.body}")
 
@@ -98,19 +170,19 @@ def _is_transient_send_error(exc: Exception) -> bool:
 
 
 @contextmanager
-def _smtp_connection():
+def _smtp_connection(cfg: dict):
     """Open a single authenticated SMTP connection with retry (reuse for batch sends)."""
     last_err = None
     for attempt in range(3):
         try:
-            if config.SMTP_USE_SSL:
-                server = smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT, timeout=30)
+            if cfg["smtp_use_ssl"]:
+                server = smtplib.SMTP_SSL(cfg["smtp_host"], cfg["smtp_port"], timeout=30)
             else:
-                server = smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30)
+                server = smtplib.SMTP(cfg["smtp_host"], cfg["smtp_port"], timeout=30)
                 server.ehlo()
                 server.starttls()
                 server.ehlo()
-            server.login(config.SMTP_USERNAME, config.SMTP_PASSWORD)
+            server.login(cfg["smtp_username"], cfg["smtp_password"])
             break
         except Exception as e:
             last_err = e
@@ -133,13 +205,14 @@ def _send_batch(svc, campaign, recipients, label="Send"):
     failed_count = 0
     errors = []
     smtp_conn = None
+    cfg = _resolve_email_config(campaign.get("email_config_id"))
 
     try:
-        with _smtp_connection() as conn:
+        with _smtp_connection(cfg) as conn:
             smtp_conn = conn
             for i, r in enumerate(recipients):
                 try:
-                    _dispatch_single_email(svc, campaign, r, _conn=smtp_conn)
+                    _dispatch_single_email(svc, campaign, r, cfg, _conn=smtp_conn)
                     sent_count += 1
                 except smtplib.SMTPServerDisconnected:
                     # Connection died mid-batch – reconnect and retry this one
@@ -168,7 +241,7 @@ def _send_batch(svc, campaign, recipients, label="Send"):
     remaining = recipients[already_processed:]
     for i, r in enumerate(remaining):
         try:
-            _dispatch_single_email(svc, campaign, r)  # individual connection
+            _dispatch_single_email(svc, campaign, r, cfg)  # individual connection
             sent_count += 1
         except Exception as exc:
             logging.error(f"{label} failed to {r['email']}: {exc}")
@@ -341,7 +414,7 @@ def _embed_images(body_html: str) -> tuple[str, list]:
         if img_data is None:
             return m.group(0)  # external URL – leave as-is
 
-        cid = f"img{counter[0]}@phishdash"
+        cid = f"img{counter[0]}@phishshield"
         counter[0] += 1
         part = MIMEImage(img_data, _subtype=subtype)
         part.add_header("Content-ID", f"<{cid}>")
@@ -354,7 +427,7 @@ def _embed_images(body_html: str) -> tuple[str, list]:
 
 
 def _send_via_smtp(to_email: str, subject: str, body_html: str, sender_display_name: str,
-                   _conn: smtplib.SMTP | None = None) -> None:
+                   cfg: dict, _conn: smtplib.SMTP | None = None) -> None:
     """Send via Gmail or Outlook SMTP with CID-embedded images.
 
     Any <img src> pointing to our /static/uploads/ folder or using data: URLs
@@ -377,31 +450,31 @@ def _send_via_smtp(to_email: str, subject: str, body_html: str, sender_display_n
         msg.attach(MIMEText(body_html, "html"))
 
     msg["Subject"] = subject
-    msg["From"] = formataddr((sender_display_name, config.SMTP_FROM_EMAIL))
+    msg["From"] = formataddr((sender_display_name, cfg["smtp_from_email"]))
     msg["To"] = to_email
 
     if _conn is not None:
         _conn.send_message(msg)
-    elif config.SMTP_USE_SSL:                       # port 465 – Gmail SSL
-        with smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as s:
-            s.login(config.SMTP_USERNAME, config.SMTP_PASSWORD)
+    elif cfg["smtp_use_ssl"]:                       # port 465 – Gmail SSL
+        with smtplib.SMTP_SSL(cfg["smtp_host"], cfg["smtp_port"], timeout=30) as s:
+            s.login(cfg["smtp_username"], cfg["smtp_password"])
             s.send_message(msg)
     else:                                           # port 587 – STARTTLS
-        with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as s:
+        with smtplib.SMTP(cfg["smtp_host"], cfg["smtp_port"], timeout=30) as s:
             s.ehlo()
             s.starttls()
             s.ehlo()
-            s.login(config.SMTP_USERNAME, config.SMTP_PASSWORD)
+            s.login(cfg["smtp_username"], cfg["smtp_password"])
             s.send_message(msg)
 
 
 def _send_email(to_email: str, subject: str, body_html: str, sender_display_name: str,
-                _conn: smtplib.SMTP | None = None) -> None:
+                cfg: dict, _conn: smtplib.SMTP | None = None) -> None:
     """Route to the configured email provider."""
-    if config.EMAIL_PROVIDER == 'sendgrid':
-        _send_via_sendgrid(to_email, subject, body_html, sender_display_name)
+    if cfg["provider"] == 'sendgrid':
+        _send_via_sendgrid(to_email, subject, body_html, sender_display_name, cfg)
     else:  # gmail / outlook
-        _send_via_smtp(to_email, subject, body_html, sender_display_name, _conn=_conn)
+        _send_via_smtp(to_email, subject, body_html, sender_display_name, cfg, _conn=_conn)
 
 
 _TRACKING_PIXEL = (
@@ -417,11 +490,22 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # CORS – applied globally via after_request
 # ---------------------------------------------------------------------------
 
+# Wildcard origins can't be combined with credentialed requests (cookies), which
+# the Clerk-backed session flow requires, so allow-list specific frontend origins.
+# Add production frontend URLs via the ALLOWED_ORIGINS env var (comma-separated).
+_ALLOWED_ORIGINS = {"http://localhost:3000"} | {
+    o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()
+}
+
+
 @app.after_request
 def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
+    origin = request.headers.get("Origin")
+    if origin in _ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Admin-Key"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Admin-Key, Authorization, X-Switch-Tenant"
     return response
 
 
@@ -456,10 +540,12 @@ def handle_exception(e):
 # ---------------------------------------------------------------------------
 
 _ROLE_PERMISSIONS = {
-    "admin":           {"dashboard", "view_campaigns", "create_campaign", "view_recipients", "add_recipients", "send", "report", "manage_users"},
-    "operator":        {"dashboard", "view_campaigns", "create_campaign", "view_recipients", "add_recipients", "send", "report"},
-    "auditor":         {"dashboard", "view_campaigns", "view_recipients", "report"},
-    "template_author": {"view_campaigns", "create_campaign"},
+    "admin":           {"dashboard", "view_campaigns", "create_campaign", "view_recipients", "add_recipients", "send", "report", "manage_users",
+                         "manage_employees", "manage_templates", "manage_settings", "view_audit_logs"},
+    "operator":        {"dashboard", "view_campaigns", "create_campaign", "view_recipients", "add_recipients", "send", "report",
+                         "manage_employees", "manage_templates", "view_audit_logs"},
+    "auditor":         {"dashboard", "view_campaigns", "view_recipients", "report", "view_audit_logs"},
+    "template_author": {"view_campaigns", "create_campaign", "manage_templates"},
 }
 
 _ROLE_LABELS = {
@@ -506,6 +592,19 @@ def _unauthorized():
 
 def _forbidden(permission: str):
     return _json_response({"error": f"Forbidden – your role does not allow '{permission}'"}, 403)
+
+
+def _log_audit(category: str, message: str) -> None:
+    # Best-effort – a logging failure should never break the action it's recording.
+    try:
+        info = _get_session_info()
+        actor = info["username"] if info else "system"
+        TenantService().create_audit_log(
+            actor=actor, category=category, message=message,
+            ip_address=request.remote_addr or "",
+        )
+    except Exception as exc:
+        logging.error(f"Audit log write failed: {exc}", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +693,7 @@ def _validate_email_address(email: str) -> dict:
     for mx_host in mx_hosts[:2]:  # Try top 2 MX servers
         try:
             with smtplib.SMTP(mx_host, 25, timeout=10) as smtp:
-                smtp.ehlo("phishdash.local")
+                smtp.ehlo("phishshield.local")
                 code, _ = smtp.mail(from_addr)
                 if code != 250:
                     continue
@@ -625,12 +724,13 @@ def _validate_email_address(email: str) -> dict:
 
 
 def _dispatch_single_email(svc: PhishingCampaignService, campaign: dict, recipient: dict,
-                           _conn: smtplib.SMTP | None = None) -> None:
-    cfg = config.get_phishing_config()
-    base_url = cfg["base_url"].rstrip("/")
+                           email_cfg: dict | None = None, _conn: smtplib.SMTP | None = None) -> None:
+    email_cfg = email_cfg or _resolve_email_config(campaign.get("email_config_id"))
+    phishing_cfg = config.get_phishing_config()
+    base_url = phishing_cfg["base_url"].rstrip("/")
     tracking_pixel_url = f"{base_url}/api/track/open/{recipient['tracking_token']}"
 
-    github_pages_url = cfg.get("github_pages_url", "").rstrip("/")
+    github_pages_url = phishing_cfg.get("github_pages_url", "").rstrip("/")
     redirect_url = (campaign.get("redirect_url") or "").strip() or "https://login.microsoftonline.com"
     if github_pages_url:
         from urllib.parse import quote as _urlencode
@@ -670,6 +770,7 @@ def _dispatch_single_email(svc: PhishingCampaignService, campaign: dict, recipie
                 subject=campaign["subject"],
                 body_html=body_html,
                 sender_display_name=campaign.get("sender_name", "Security Team"),
+                cfg=email_cfg,
                 _conn=_conn,
             )
             last_exc = None
@@ -810,9 +911,11 @@ def campaigns():
         body_html = (body.get("body_html") or "").strip()
         sender_name = (body.get("sender_name") or "Security Team").strip()
         redirect_url = (body.get("redirect_url") or "").strip()
+        email_config_id = (body.get("email_config_id") or "").strip() or None
         if not name or not subject or not body_html:
             return _json_response({"error": "name, subject, and body_html are required"}, 400)
-        campaign = svc.create_campaign(name, subject, body_html, sender_name, redirect_url)
+        campaign = svc.create_campaign(name, subject, body_html, sender_name, redirect_url, email_config_id)
+        _log_audit("CAMPAIGN", f"Campaign \"{name}\" created")
         return _json_response(campaign, 201)
     except Exception as exc:
         logging.error(f"Campaigns error: {exc}", exc_info=True)
@@ -828,9 +931,11 @@ def campaign_detail(campaign_id):
         if not _can(role, "create_campaign"):
             return _unauthorized() if not role else _forbidden("delete_campaign")
         svc = PhishingCampaignService()
+        existing = svc.get_campaign(campaign_id)
         ok = svc.delete_campaign(campaign_id)
         if not ok:
             return _json_response({"error": "Campaign not found"}, 404)
+        _log_audit("CAMPAIGN", f"Campaign \"{existing['name'] if existing else campaign_id}\" deleted")
         return _json_response({"message": "Campaign deleted"})
     if not _can(role, "view_campaigns"):
         return _unauthorized() if not role else _forbidden("view_campaigns")
@@ -1030,6 +1135,7 @@ def send_campaign(campaign_id):
     started = _start_send_job(campaign_id, label="Send", queued=len(to_send), do_validate=True)
     if not started:
         return _json_response({"error": "A send is already running for this campaign"}, 409)
+    _log_audit("CAMPAIGN", f"Campaign \"{campaign['name']}\" launched to {len(to_send)} recipient(s)")
     return _json_response({
         "queued": len(to_send),
         "campaign_id": campaign_id,
@@ -1537,6 +1643,24 @@ def dashboard_summary():
         return _json_response({"error": f"Failed to load dashboard: {exc}"}, 500)
 
 
+@app.route("/api/phish/analytics/overview", methods=["GET", "OPTIONS"])
+def analytics_overview():
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "dashboard"):
+        return _unauthorized() if not role else _forbidden("dashboard")
+    try:
+        svc = TenantService()
+        return _json_response({
+            "department_rates": svc.get_department_click_rates(),
+            "recent_events": svc.get_recent_risk_events(limit=5),
+        })
+    except Exception as exc:
+        logging.error(f"Analytics overview error: {exc}", exc_info=True)
+        return _json_response({"error": f"Failed to load analytics: {exc}"}, 500)
+
+
 # ---------------------------------------------------------------------------
 # AI email generation
 # ---------------------------------------------------------------------------
@@ -1628,9 +1752,289 @@ def upload_image():
 
 
 # ---------------------------------------------------------------------------
+# Employees
+# ---------------------------------------------------------------------------
+
+@app.route("/api/phish/employees", methods=["GET", "POST", "OPTIONS"])
+def employees():
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_employees"):
+        return _unauthorized() if not role else _forbidden("manage_employees")
+    try:
+        svc = TenantService()
+        if request.method == "GET":
+            return _json_response(svc.list_employees())
+        body = request.get_json(force=True, silent=True) or {}
+        name = (body.get("name") or "").strip()
+        email = (body.get("email") or "").strip()
+        if not name or not email:
+            return _json_response({"error": "Name and email are required"}, 400)
+        employee = svc.create_employee(
+            name=name, email=email,
+            department=(body.get("department") or "").strip(),
+            manager=(body.get("manager") or "").strip(),
+            risk_rating=(body.get("riskRating") or "low"),
+        )
+        _log_audit("EMPLOYEE", f"Employee \"{name}\" ({email}) added")
+        return _json_response(employee, 201)
+    except Exception as exc:
+        if "unique" in str(exc).lower():
+            return _json_response({"error": "An employee with this email already exists"}, 409)
+        logging.error(f"Employees error: {exc}", exc_info=True)
+        return _json_response({"error": f"Server error: {exc}"}, 500)
+
+
+@app.route("/api/phish/employees/<employee_id>", methods=["PUT", "DELETE", "OPTIONS"])
+def employee_detail(employee_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_employees"):
+        return _unauthorized() if not role else _forbidden("manage_employees")
+    try:
+        svc = TenantService()
+        if request.method == "DELETE":
+            existing = svc.get_employee(employee_id)
+            deleted = svc.delete_employee(employee_id)
+            if not deleted:
+                return _json_response({"error": "Employee not found"}, 404)
+            _log_audit("EMPLOYEE", f"Employee \"{existing['name'] if existing else employee_id}\" deleted")
+            return _json_response({"message": "Employee deleted"})
+        body = request.get_json(force=True, silent=True) or {}
+        updated = svc.update_employee(employee_id, body)
+        if not updated:
+            return _json_response({"error": "Employee not found"}, 404)
+        _log_audit("EMPLOYEE", f"Employee \"{updated['name']}\" updated")
+        return _json_response(updated)
+    except Exception as exc:
+        logging.error(f"Employee detail error: {exc}", exc_info=True)
+        return _json_response({"error": f"Server error: {exc}"}, 500)
+
+
+@app.route("/api/phish/employees/import", methods=["POST", "OPTIONS"])
+def import_employees():
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_employees"):
+        return _unauthorized() if not role else _forbidden("manage_employees")
+    file = request.files.get("file")
+    if not file or not file.filename:
+        return _json_response({"error": "No file provided"}, 400)
+    try:
+        result = TenantService().import_employees_csv(file.read())
+        _log_audit(
+            "EMPLOYEE",
+            f"CSV import: {result['success_count']} added, "
+            f"{result['duplicate_count']} duplicates, {result['error_count']} errors",
+        )
+        return _json_response(result)
+    except Exception as exc:
+        logging.error(f"Employee import error: {exc}", exc_info=True)
+        return _json_response({"error": f"Server error: {exc}"}, 500)
+
+
+# ---------------------------------------------------------------------------
+# Phishing templates
+# ---------------------------------------------------------------------------
+
+@app.route("/api/phish/templates", methods=["GET", "POST", "OPTIONS"])
+def templates():
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if request.method == "GET":
+        if not _can(role, "view_campaigns"):
+            return _unauthorized() if not role else _forbidden("view_campaigns")
+    else:
+        if not _can(role, "manage_templates"):
+            return _unauthorized() if not role else _forbidden("manage_templates")
+    try:
+        svc = TenantService()
+        if request.method == "GET":
+            return _json_response(svc.list_templates())
+        body = request.get_json(force=True, silent=True) or {}
+        name = (body.get("name") or "").strip()
+        subject = (body.get("subject") or "").strip()
+        template_body = (body.get("body") or "").strip()
+        category = (body.get("category") or "").strip()
+        if not name or not subject or not template_body or not category:
+            return _json_response({"error": "Name, category, subject, and body are required"}, 400)
+        template = svc.create_template(
+            name=name, category=category, subject=subject, body=template_body,
+            description=(body.get("description") or ""),
+            thumbnail=(body.get("thumbnail") or ""),
+        )
+        _log_audit("CAMPAIGN", f"Template \"{name}\" created")
+        return _json_response(template, 201)
+    except Exception as exc:
+        logging.error(f"Templates error: {exc}", exc_info=True)
+        return _json_response({"error": f"Server error: {exc}"}, 500)
+
+
+@app.route("/api/phish/templates/<template_id>", methods=["DELETE", "OPTIONS"])
+def template_detail(template_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_templates"):
+        return _unauthorized() if not role else _forbidden("manage_templates")
+    try:
+        svc = TenantService()
+        existing = next((t for t in svc.list_templates() if (t.get("id") == template_id)), None)
+        deleted = svc.delete_template(template_id)
+        if not deleted:
+            return _json_response({"error": "Template not found or is a global template"}, 404)
+        _log_audit("CAMPAIGN", f"Template \"{existing['name'] if existing else template_id}\" deleted")
+        return _json_response({"message": "Template deleted"})
+    except Exception as exc:
+        logging.error(f"Template detail error: {exc}", exc_info=True)
+        return _json_response({"error": f"Server error: {exc}"}, 500)
+
+
+# ---------------------------------------------------------------------------
+# Audit logs
+# ---------------------------------------------------------------------------
+
+@app.route("/api/phish/audit-logs", methods=["GET", "POST", "OPTIONS"])
+def audit_logs():
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "view_audit_logs"):
+        return _unauthorized() if not role else _forbidden("view_audit_logs")
+    try:
+        svc = TenantService()
+        if request.method == "GET":
+            return _json_response(svc.list_audit_logs())
+        body = request.get_json(force=True, silent=True) or {}
+        actor = (body.get("actor") or "").strip()
+        message = (body.get("message") or "").strip()
+        if not actor or not message:
+            return _json_response({"error": "Actor and message are required"}, 400)
+        log = svc.create_audit_log(
+            actor=actor, category=(body.get("category") or "SECURITY"),
+            message=message, ip_address=(body.get("ipAddress") or request.remote_addr or ""),
+        )
+        return _json_response(log, 201)
+    except Exception as exc:
+        logging.error(f"Audit logs error: {exc}", exc_info=True)
+        return _json_response({"error": f"Server error: {exc}"}, 500)
+
+
+# ---------------------------------------------------------------------------
+# Tenant settings + branding
+# ---------------------------------------------------------------------------
+
+@app.route("/api/tenant/settings", methods=["GET", "POST", "OPTIONS"])
+def tenant_settings():
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if request.method == "GET":
+        if not role:
+            return _unauthorized()
+    else:
+        if not _can(role, "manage_settings"):
+            return _unauthorized() if not role else _forbidden("manage_settings")
+    try:
+        svc = TenantService()
+        if request.method == "GET":
+            return _json_response(svc.to_frontend_shape())
+        body = request.get_json(force=True, silent=True) or {}
+        raw = svc.save_settings(body)
+        sso = body.get("sso_config") or {}
+        if sso.get("client_id") or sso.get("client_secret"):
+            _log_audit("SSO_CONFIG", "Microsoft Entra ID (OIDC) configuration updated")
+        elif body.get("email_configs"):
+            _log_audit("SMTP", "Tenant email sender configuration updated")
+        else:
+            _log_audit("SECURITY", "Tenant branding settings updated")
+        return _json_response(svc.to_frontend_shape(raw))
+    except Exception as exc:
+        logging.error(f"Tenant settings error: {exc}", exc_info=True)
+        return _json_response({"error": f"Server error: {exc}"}, 500)
+
+
+@app.route("/api/tenant/settings/test-email", methods=["POST", "OPTIONS"])
+def test_email_config():
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_settings"):
+        return _unauthorized() if not role else _forbidden("manage_settings")
+    body = request.get_json(force=True, silent=True) or {}
+    cfg = body.get("config") or {}
+    recipient = (body.get("recipient") or "").strip()
+    if not recipient:
+        return _json_response({"success": False, "error": "Recipient email is required"}, 400)
+    try:
+        provider = cfg.get("provider", "smtp")
+        subject = "PhishShield test email"
+        body_html = "<p>This is a test email from your PhishShield tenant settings.</p>"
+        if provider == "sendgrid":
+            api_key = cfg.get("sendgrid_api_key")
+            if not api_key:
+                return _json_response({"success": False, "error": "SendGrid API key not configured"}, 400)
+            mail = Mail(
+                from_email=From(cfg.get("sendgrid_from_email", ""), cfg.get("sendgrid_from_name", "")),
+                to_emails=To(recipient),
+                subject=Subject(subject),
+                html_content=HtmlContent(body_html),
+            )
+            SendGridAPIClient(api_key).send(mail)
+        else:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = formataddr((cfg.get("smtp_from_name", ""), cfg.get("smtp_from_email", "")))
+            msg["To"] = recipient
+            msg.attach(MIMEText(body_html, "html"))
+            host = cfg.get("smtp_host")
+            port = int(cfg.get("smtp_port") or 465)
+            if not host:
+                return _json_response({"success": False, "error": "SMTP host not configured"}, 400)
+            if port == 465:
+                with smtplib.SMTP_SSL(host, port, timeout=15) as s:
+                    s.login(cfg.get("smtp_username", ""), cfg.get("smtp_password", ""))
+                    s.send_message(msg)
+            else:
+                with smtplib.SMTP(host, port, timeout=15) as s:
+                    s.starttls()
+                    s.login(cfg.get("smtp_username", ""), cfg.get("smtp_password", ""))
+                    s.send_message(msg)
+        return _json_response({"success": True, "message": f"Test email sent to {recipient}"})
+    except Exception as exc:
+        logging.error(f"Test email error: {exc}", exc_info=True)
+        return _json_response({"success": False, "error": str(exc)}, 200)
+
+
+@app.route("/api/auth/branding", methods=["GET", "OPTIONS"])
+def branding():
+    if request.method == "OPTIONS":
+        return "", 200
+    try:
+        raw = TenantService().get_settings_raw()
+        return _json_response({
+            "tenant_id": "default",
+            "tenant_name": raw["name"],
+            "logo_url": raw["logo_url"],
+            "primary_color": raw["primary_color"],
+            "sso_configured": bool(raw["sso_client_id"]),
+        })
+    except Exception as exc:
+        logging.error(f"Branding error: {exc}", exc_info=True)
+        return _json_response({"error": f"Server error: {exc}"}, 500)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port, debug=os.environ.get("FLASK_DEBUG", "0") == "1")
+    # threaded=True: the SPA frontend fires several API calls in parallel on
+    # page load, which the default single-threaded dev server serializes and
+    # frequently drops (net::ERR_FAILED) under that load.
+    app.run(host="0.0.0.0", port=port, debug=os.environ.get("FLASK_DEBUG", "0") == "1", threaded=True)
