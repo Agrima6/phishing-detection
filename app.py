@@ -373,6 +373,44 @@ def _start_send_job(campaign_id: str, label: str, queued: int, do_validate: bool
 
 
 # ---------------------------------------------------------------------------
+# Scheduled sends – a lightweight poller checks every 20s for draft campaigns
+# whose scheduled_at has arrived and launches them the same way the manual
+# "Deploy" button does.
+# ---------------------------------------------------------------------------
+
+def _scheduler_loop():
+    while True:
+        try:
+            svc = PhishingCampaignService()
+            for campaign in svc.list_due_scheduled_campaigns():
+                recipients_list = svc.list_recipients(campaign["id"])
+                to_send = [r for r in recipients_list if r.get("status") == "pending"]
+                svc.set_scheduled_at(campaign["id"], None)
+                if not to_send:
+                    continue
+                started = _start_send_job(campaign["id"], label="Scheduled Send", queued=len(to_send), do_validate=True)
+                if started:
+                    _log_audit("CAMPAIGN", f"Scheduled campaign \"{campaign['name']}\" launched to {len(to_send)} recipient(s)")
+        except Exception:
+            logging.exception("Scheduled-send poller iteration failed")
+        time.sleep(20)
+
+
+def _start_scheduler():
+    # Flask's debug reloader runs this module twice in a parent watcher
+    # process and a child worker process; only the child (which actually
+    # serves requests) should run the poller, or scheduled sends would fire
+    # twice.
+    debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
+    if debug_mode and os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+        return
+    threading.Thread(target=_scheduler_loop, name="campaign-scheduler", daemon=True).start()
+
+
+_start_scheduler()
+
+
+# ---------------------------------------------------------------------------
 # CID image embedding – inline images in email HTML
 # ---------------------------------------------------------------------------
 
@@ -1151,6 +1189,39 @@ def send_campaign(campaign_id):
         "state": "queued",
         "message": f"Send queued for {len(to_send)} recipient(s). Running in background."
     }, 202)
+
+
+@app.route("/api/phish/campaigns/<campaign_id>/schedule", methods=["POST", "OPTIONS"])
+def schedule_campaign(campaign_id):
+    """Set (or clear, with scheduled_at: null) a future send time for a draft
+    campaign. A background poller (_scheduler_loop) launches it automatically
+    once that time arrives."""
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "send"):
+        return _unauthorized() if not role else _forbidden("send")
+    svc = PhishingCampaignService()
+    campaign = svc.get_campaign(campaign_id)
+    if not campaign:
+        return _json_response({"error": "Campaign not found"}, 404)
+    body = request.get_json(force=True, silent=True) or {}
+    scheduled_at = body.get("scheduled_at")
+    if scheduled_at:
+        try:
+            parsed = datetime.fromisoformat(str(scheduled_at).replace("Z", "+00:00"))
+        except ValueError:
+            return _json_response({"error": "scheduled_at must be a valid ISO 8601 datetime"}, 400)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        if parsed <= datetime.now(timezone.utc):
+            return _json_response({"error": "scheduled_at must be in the future"}, 400)
+        svc.set_scheduled_at(campaign_id, parsed.isoformat())
+        _log_audit("CAMPAIGN", f"Campaign \"{campaign['name']}\" scheduled for {parsed.isoformat()}")
+        return _json_response({"scheduled_at": parsed.isoformat()})
+    svc.set_scheduled_at(campaign_id, None)
+    _log_audit("CAMPAIGN", f"Removed schedule for campaign \"{campaign['name']}\"")
+    return _json_response({"scheduled_at": None})
 
 
 @app.route("/api/phish/campaigns/<campaign_id>/send/status", methods=["GET", "OPTIONS"])

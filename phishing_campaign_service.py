@@ -217,6 +217,8 @@ def _init_db():
         existing_campaign_cols = _table_columns(cursor, "campaigns")
         if "email_config_id" not in existing_campaign_cols:
             cursor.execute("ALTER TABLE campaigns ADD COLUMN email_config_id TEXT")
+        if "scheduled_at" not in existing_campaign_cols:
+            cursor.execute("ALTER TABLE campaigns ADD COLUMN scheduled_at TEXT")
         for idx in index_statements:
             cursor.execute(idx)
         conn.commit()
@@ -297,6 +299,29 @@ class PhishingCampaignService:
         row = _fetchone_dict(cursor)
         conn.close()
         return row
+
+    def set_scheduled_at(self, campaign_id: str, scheduled_at: str | None) -> None:
+        with _db_lock:
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE campaigns SET scheduled_at = ?, updated_at = ? WHERE id = ?",
+                (scheduled_at, _utcnow_iso(), campaign_id),
+            )
+            conn.commit()
+            conn.close()
+
+    def list_due_scheduled_campaigns(self) -> list:
+        """Draft campaigns whose scheduled send time has arrived."""
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM campaigns WHERE status = 'draft' AND scheduled_at IS NOT NULL AND scheduled_at <= ?",
+            (_utcnow_iso(),),
+        )
+        rows = _fetchall_dict(cursor)
+        conn.close()
+        return rows
 
     def update_campaign_stats(self, campaign_id: str,
                               sent_delta: int = 0, opened_delta: int = 0,
