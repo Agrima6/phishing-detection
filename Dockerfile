@@ -6,13 +6,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY config.py .
-COPY app.py .
-COPY auth_clerk.py .
-COPY phishing_campaign_service.py .
-COPY tenant_service.py .
-COPY gemini_service.py .
+# Copy application code. Wildcard (not individual COPY lines) so adding a
+# new top-level module never again requires remembering to also list it
+# here - this has already broken two production deploys.
+COPY *.py .
 COPY static/ static/
 COPY landing_page/ landing_page/
 
