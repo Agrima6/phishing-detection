@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timezone
 
 from config import config
+from default_templates import build_default_templates
 from phishing_campaign_service import _get_conn, _fetchone_dict, _fetchall_dict
 
 _db_lock = threading.Lock()
@@ -99,78 +100,30 @@ def _init_db():
                 "VALUES (1, 'Default Company', '[]', '#7a1220', '', '', '', '', '[]')"
             )
 
-        # Seed one default global template, visible to every account, so a
-        # fresh tenant/database always has something usable out of the box.
-        cursor.execute(
-            "SELECT COUNT(*) FROM templates WHERE name = ?",
-            ("IT Password Expiration Notice",),
-        )
-        if cursor.fetchone()[0] == 0:
-            base_url = config.PHISHING_BASE_URL.rstrip("/")
-            banner_url = f"{base_url}/static/uploads/16372ba6a4954ea1a7aaa08b674f31bb.svg"
-            body_html = f"""<html>
-<body style="margin:0;padding:0;background-color:#f1f5f9;font-family:Arial, Helvetica, sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f1f5f9;padding:24px 0;">
-    <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-          <tr>
-            <td>
-              <img src="{banner_url}" width="600" height="140" alt="Corporate IT Security" style="display:block;width:100%;height:auto;" />
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:32px 40px;">
-              <p style="font-size:15px;color:#1e293b;margin:0 0 16px 0;">{{{{greeting}}}}, {{{{first_name}}}},</p>
-              <p style="font-size:15px;color:#334155;line-height:1.6;margin:0 0 16px 0;">
-                Our records indicate that the password for your corporate account (<strong>{{{{email}}}}</strong>) is scheduled to expire in <strong>24 hours</strong>. To avoid interruption to your email, calendar, and file access, please verify your identity and update your password before the deadline.
-              </p>
-              <table cellpadding="0" cellspacing="0" style="margin:28px 0;">
-                <tr>
-                  <td style="background-color:#d97706;border-radius:6px;">
-                    <a href="{{{{phishing_link}}}}" target="_blank" style="display:inline-block;padding:14px 32px;font-size:15px;font-weight:bold;color:#ffffff;text-decoration:none;">
-                      Update Password Now
-                    </a>
-                  </td>
-                </tr>
-              </table>
-              <p style="font-size:13px;color:#64748b;line-height:1.6;margin:0 0 8px 0;">
-                If you do not update your password within 24 hours, your account access may be temporarily suspended pending manual re-verification by the IT Helpdesk.
-              </p>
-              <p style="font-size:13px;color:#64748b;line-height:1.6;margin:0;">
-                This is an automated message from the Corporate IT Security team. Please do not reply directly to this email.
-              </p>
-            </td>
-          </tr>
-          <tr>
-            <td style="background-color:#f8fafc;padding:20px 40px;border-top:1px solid #e2e8f0;">
-              <p style="font-size:11px;color:#94a3b8;margin:0;">
-                &copy; 2026 Corporate IT Security Department. This email was sent to {{{{email}}}} as part of your organization's account security policy.
-              </p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>"""
-            cursor.execute(
-                "INSERT INTO templates (id, name, category, subject, body, description, "
-                "thumbnail, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(uuid.uuid4()),
-                    "IT Password Expiration Notice",
-                    "credential-harvester",
-                    "Action Required: Your Password Expires in 24 Hours",
-                    body_html,
-                    'Simulates a corporate IT password-expiration alert to test whether '
-                    'employees click a suspicious "update password" link.',
-                    banner_url,
-                    1,
-                    _utcnow_iso(),
-                ),
-            )
+        # Seed the default global template library, visible to every account,
+        # so a fresh tenant/database always has a realistic set to choose
+        # from out of the box. Each is checked by name so re-running this on
+        # an existing database only inserts the ones that are still missing.
+        base_url = config.PHISHING_BASE_URL.rstrip("/")
+        banner_url = f"{base_url}/static/uploads/16372ba6a4954ea1a7aaa08b674f31bb.svg"
+        for tmpl in build_default_templates(banner_url):
+            cursor.execute("SELECT COUNT(*) FROM templates WHERE name = ?", (tmpl["name"],))
+            if cursor.fetchone()[0] == 0:
+                cursor.execute(
+                    "INSERT INTO templates (id, name, category, subject, body, description, "
+                    "thumbnail, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(uuid.uuid4()),
+                        tmpl["name"],
+                        tmpl["category"],
+                        tmpl["subject"],
+                        tmpl["body"],
+                        tmpl["description"],
+                        tmpl["thumbnail"],
+                        1,
+                        _utcnow_iso(),
+                    ),
+                )
 
         conn.commit()
         conn.close()
