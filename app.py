@@ -995,6 +995,10 @@ def recipients(campaign_id):
     result = {"added": len(created), "invalid": invalid, "recipients": created}
     if warnings:
         result["warnings"] = warnings
+    if created:
+        campaign = svc.get_campaign(campaign_id)
+        campaign_label = campaign["name"] if campaign else campaign_id
+        _log_audit("CAMPAIGN", f"{len(created)} recipient(s) added to campaign \"{campaign_label}\"")
     return _json_response(result, 201)
 
 
@@ -1006,9 +1010,12 @@ def delete_recipient(campaign_id, recipient_id):
     if not _can(role, "add_recipients"):
         return _unauthorized() if not role else _forbidden("add_recipients")
     svc = PhishingCampaignService()
+    target = next((r for r in svc.list_recipients(campaign_id) if r["id"] == recipient_id), None)
     ok = svc.delete_recipient(recipient_id)
     if not ok:
         return _json_response({"error": "Recipient not found"}, 404)
+    if target:
+        _log_audit("CAMPAIGN", f"Recipient \"{target['email']}\" removed from campaign")
     return _json_response({"message": "Recipient deleted"})
 
 
@@ -1104,6 +1111,7 @@ def resend_campaign(campaign_id):
     started = _start_send_job(campaign_id, label="Resend", queued=queued, do_validate=False)
     if not started:
         return _json_response({"error": "A send is already running for this campaign"}, 409)
+    _log_audit("CAMPAIGN", f"Campaign \"{campaign['name']}\" resent to {queued} recipient(s)")
     return _json_response({
         "queued": queued,
         "reset": reset_count,
@@ -1182,6 +1190,7 @@ def resend_failed_campaign(campaign_id):
     started = _start_send_job(campaign_id, label="ResendFailed", queued=cleared, do_validate=True)
     if not started:
         return _json_response({"error": "A send is already running for this campaign"}, 409)
+    _log_audit("CAMPAIGN", f"Campaign \"{campaign['name']}\" resent to {cleared} previously-failed recipient(s)")
     return _json_response({
         "queued": cleared,
         "campaign_id": campaign_id,
