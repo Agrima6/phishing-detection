@@ -21,6 +21,7 @@ dnspython==2.7.0
 
 # Clerk – authentication for the admin dashboard
 clerk-backend-api>=6.0.0
+requests>=2.31.0
 
 # Postgres driver – used in production when DATABASE_URL is set (persistent
 # storage on hosts without a disk, e.g. Render's free tier). Local dev without

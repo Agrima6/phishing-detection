@@ -24,6 +24,7 @@ except ImportError:
 import smtplib
 import base64
 import dns.resolver
+import requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
@@ -2008,6 +2009,65 @@ def test_email_config():
     except Exception as exc:
         logging.error(f"Test email error: {exc}", exc_info=True)
         return _json_response({"success": False, "error": str(exc)}, 200)
+
+
+_CLERK_API_BASE = "https://api.clerk.com/v1"
+
+
+def _clerk_headers() -> dict:
+    return {"Authorization": f"Bearer {config.CLERK_SECRET_KEY}", "Content-Type": "application/json"}
+
+
+@app.route("/api/admin/allowlist", methods=["GET", "POST", "OPTIONS"])
+def admin_allowlist():
+    """Manage who is allowed to create an account at all. Clerk's own
+    allowlist restriction (enabled separately) rejects sign-up for any email
+    not added here first - this is how a Super Admin controls who at a
+    customer company can self-register, without building a custom invite
+    flow from scratch."""
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_users"):
+        return _unauthorized() if not role else _forbidden("manage_users")
+    if not config.CLERK_SECRET_KEY:
+        return _json_response({"error": "Clerk is not configured on this server"}, 500)
+
+    if request.method == "GET":
+        resp = requests.get(f"{_CLERK_API_BASE}/allowlist_identifiers", headers=_clerk_headers(), timeout=15)
+        return _json_response(resp.json(), resp.status_code)
+
+    body = request.get_json(force=True, silent=True) or {}
+    email = (body.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return _json_response({"error": "A valid email is required"}, 400)
+    resp = requests.post(
+        f"{_CLERK_API_BASE}/allowlist_identifiers",
+        headers=_clerk_headers(),
+        json={"identifier": email, "notify": True},
+        timeout=15,
+    )
+    if resp.status_code >= 400:
+        return _json_response(resp.json(), resp.status_code)
+    _log_audit("SECURITY", f"Allowlisted \"{email}\" for account sign-up")
+    return _json_response(resp.json(), resp.status_code)
+
+
+@app.route("/api/admin/allowlist/<identifier_id>", methods=["DELETE", "OPTIONS"])
+def admin_allowlist_delete(identifier_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_users"):
+        return _unauthorized() if not role else _forbidden("manage_users")
+    if not config.CLERK_SECRET_KEY:
+        return _json_response({"error": "Clerk is not configured on this server"}, 500)
+    resp = requests.delete(
+        f"{_CLERK_API_BASE}/allowlist_identifiers/{identifier_id}", headers=_clerk_headers(), timeout=15
+    )
+    if resp.status_code < 400:
+        _log_audit("SECURITY", f"Removed allowlist entry {identifier_id}")
+    return _json_response(resp.json() if resp.content else {"deleted": True}, resp.status_code)
 
 
 @app.route("/api/auth/branding", methods=["GET", "OPTIONS"])

@@ -69,7 +69,7 @@ def _init_db():
             id                INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
             name              TEXT    NOT NULL DEFAULT 'Default Company',
             domains           TEXT    NOT NULL DEFAULT '[]',
-            primary_color     TEXT    NOT NULL DEFAULT '#d97706',
+            primary_color     TEXT    NOT NULL DEFAULT '#7a1220',
             logo_url          TEXT    NOT NULL DEFAULT '',
             sso_client_id     TEXT    NOT NULL DEFAULT '',
             sso_tenant_id     TEXT    NOT NULL DEFAULT '',
@@ -96,7 +96,7 @@ def _init_db():
             cursor.execute(
                 "INSERT INTO tenant_settings (id, name, domains, primary_color, logo_url, "
                 "sso_client_id, sso_tenant_id, sso_client_secret, email_configs) "
-                "VALUES (1, 'Default Company', '[]', '#d97706', '', '', '', '', '[]')"
+                "VALUES (1, 'Default Company', '[]', '#7a1220', '', '', '', '', '[]')"
             )
 
         # Seed one default global template, visible to every account, so a
