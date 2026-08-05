@@ -10,6 +10,9 @@ class Config:
         self._load_config()
 
     def _load_config(self):
+        # ── Chatbot (Gemini Generative Language API) ─────────────────────────
+        self.GEMINI_CHATBOT_API_KEY = os.environ.get('GEMINI_CHATBOT_API_KEY', '')
+
         # ── Email provider switch ────────────────────────────────────────────
         # Set to 'sendgrid', 'gmail', or 'outlook'
         self.EMAIL_PROVIDER = os.environ.get('EMAIL_PROVIDER', 'sendgrid').lower()

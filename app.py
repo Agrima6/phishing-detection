@@ -1819,6 +1819,81 @@ def health_check():
 
 
 # ---------------------------------------------------------------------------
+# Chatbot – "Shieldy", a small in-app assistant powered by the Gemini
+# Generative Language API (simple API-key auth, distinct from the Vertex AI
+# service-account setup gemini_service.py uses for AI email generation).
+# ---------------------------------------------------------------------------
+
+_CHATBOT_SYSTEM_PROMPT = (
+    "You are Shieldy, the friendly built-in assistant for Workmate Shield, a phishing-simulation "
+    "and security-awareness platform. You help admins understand how to use the product: creating "
+    "phishing simulation campaigns, managing the employee directory, reading risk analytics and "
+    "reports, scheduling sends, and general phishing/security-awareness best practices. Keep replies "
+    "short (2-4 sentences), warm, and a little playful, using at most one emoji per reply. If asked "
+    "something totally unrelated to the product or security awareness, gently redirect back on-topic."
+)
+_CHATBOT_MODEL = "gemini-2.0-flash"
+
+
+@app.route("/api/chatbot/message", methods=["POST", "OPTIONS"])
+def chatbot_message():
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not role:
+        return _unauthorized()
+    if not config.GEMINI_CHATBOT_API_KEY:
+        return _json_response({"error": "Chatbot is not configured on this server"}, 503)
+
+    body = request.get_json(force=True, silent=True) or {}
+    message = (body.get("message") or "").strip()
+    history = body.get("history") or []  # [{role: "user"|"model", text: str}, ...]
+    if not message:
+        return _json_response({"error": "message is required"}, 400)
+
+    contents = [
+        {"role": "user", "parts": [{"text": _CHATBOT_SYSTEM_PROMPT}]},
+        {"role": "model", "parts": [{"text": "Got it — I'm Shieldy! Ready to help. 🛡️"}]},
+    ]
+    for turn in history[-10:]:
+        turn_role = "model" if turn.get("role") == "model" else "user"
+        text = (turn.get("text") or "").strip()
+        if text:
+            contents.append({"role": turn_role, "parts": [{"text": text}]})
+    contents.append({"role": "user", "parts": [{"text": message}]})
+
+    try:
+        resp = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{_CHATBOT_MODEL}:generateContent",
+            params={"key": config.GEMINI_CHATBOT_API_KEY},
+            json={"contents": contents, "generationConfig": {"maxOutputTokens": 300, "temperature": 0.8}},
+            timeout=20,
+        )
+        data = resp.json()
+        if resp.status_code >= 400:
+            err_msg = data.get("error", {}).get("message", "Unknown error")
+            logging.warning(f"Chatbot Gemini call failed: {err_msg}")
+            return _json_response({
+                "reply": "I'm having trouble reaching my brain right now (the AI service reported an error). "
+                         "Try again in a moment! 🛡️",
+                "error_detail": err_msg,
+            }, 200)
+        reply = (
+            data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+        ).strip() or "Hmm, I didn't quite catch that — could you rephrase?"
+        return _json_response({"reply": reply})
+    except Exception as exc:
+        logging.error(f"Chatbot call failed: {exc}", exc_info=True)
+        return _json_response({
+            "reply": "I'm briefly offline — please try again shortly! 🛡️",
+            "error_detail": str(exc),
+        }, 200)
+
+
+# ---------------------------------------------------------------------------
 # Image upload – stores file in static/uploads/ and returns a public URL
 # ---------------------------------------------------------------------------
 
