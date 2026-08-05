@@ -219,6 +219,9 @@ def _init_db():
             cursor.execute("ALTER TABLE campaigns ADD COLUMN email_config_id TEXT")
         if "scheduled_at" not in existing_campaign_cols:
             cursor.execute("ALTER TABLE campaigns ADD COLUMN scheduled_at TEXT")
+        if "tenant_id" not in existing_campaign_cols:
+            cursor.execute("ALTER TABLE campaigns ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+            cursor.execute("CREATE INDEX IF NOT EXISTS IX_campaigns_tenant_id ON campaigns (tenant_id)")
         for idx in index_statements:
             cursor.execute(idx)
         conn.commit()
@@ -244,10 +247,11 @@ def _ensure_db_ready():
 class PhishingCampaignService:
     """Service layer for the phishing-awareness dashboard (SQLite backend)."""
 
-    def __init__(self):
+    def __init__(self, tenant_id: str = "default"):
         _ensure_db_ready()  # lazy init – safe to call multiple times
         cfg = config.get_phishing_config()
         self._base_url = cfg["base_url"].rstrip("/")
+        self.tenant_id = tenant_id or "default"
 
     # ------------------------------------------------------------------
     # Campaign CRUD
@@ -265,7 +269,7 @@ class PhishingCampaignService:
             "redirect_url": redirect_url, "email_config_id": email_config_id,
             "status": "draft", "created_at": now, "updated_at": now,
             "total_sent": 0, "total_opened": 0, "total_clicked": 0,
-            "total_failed": 0, "total_duplicates": 0,
+            "total_failed": 0, "total_duplicates": 0, "tenant_id": self.tenant_id,
         }
         with _db_lock:
             conn = _get_conn()
@@ -274,28 +278,31 @@ class PhishingCampaignService:
                 INSERT INTO campaigns
                   (id, name, subject, body_html, sender_name, redirect_url, email_config_id, status,
                    created_at, updated_at, total_sent, total_opened, total_clicked,
-                   total_failed, total_duplicates)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   total_failed, total_duplicates, tenant_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (row["id"], row["name"], row["subject"], row["body_html"],
                   row["sender_name"], row["redirect_url"], row["email_config_id"], row["status"],
-                  row["created_at"], row["updated_at"], 0, 0, 0, 0, 0))
+                  row["created_at"], row["updated_at"], 0, 0, 0, 0, 0, self.tenant_id))
             conn.commit()
             conn.close()
-        logging.info(f"Campaign created: {campaign_id} – {name}")
+        logging.info(f"Campaign created: {campaign_id} – {name} (tenant={self.tenant_id})")
         return row
 
     def list_campaigns(self) -> list:
         conn = _get_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM campaigns ORDER BY created_at DESC")
+        cursor.execute("SELECT * FROM campaigns WHERE tenant_id = ? ORDER BY created_at DESC", (self.tenant_id,))
         rows = _fetchall_dict(cursor)
         conn.close()
         return rows
 
     def get_campaign(self, campaign_id: str) -> dict | None:
+        """Tenant-scoped: returns None for another tenant's campaign, same
+        as not found, so callers' existing 404 handling enforces isolation
+        without needing their own tenant checks."""
         conn = _get_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,))
+        cursor.execute("SELECT * FROM campaigns WHERE id = ? AND tenant_id = ?", (campaign_id, self.tenant_id))
         row = _fetchone_dict(cursor)
         conn.close()
         return row
@@ -471,9 +478,16 @@ class PhishingCampaignService:
         with _db_lock:
             conn = _get_conn()
             cursor = conn.cursor()
+            # Check ownership first - otherwise the events/recipients deletes
+            # below would wipe another tenant's data as a side effect even
+            # though their campaigns row itself is correctly left untouched.
+            cursor.execute("SELECT 1 FROM campaigns WHERE id = ? AND tenant_id = ?", (campaign_id, self.tenant_id))
+            if cursor.fetchone() is None:
+                conn.close()
+                return False
             cursor.execute("DELETE FROM events     WHERE campaign_id = ?", (campaign_id,))
             cursor.execute("DELETE FROM recipients WHERE campaign_id = ?", (campaign_id,))
-            cursor.execute("DELETE FROM campaigns  WHERE id = ?", (campaign_id,))
+            cursor.execute("DELETE FROM campaigns  WHERE id = ? AND tenant_id = ?", (campaign_id, self.tenant_id))
             affected = cursor.rowcount
             conn.commit()
             conn.close()

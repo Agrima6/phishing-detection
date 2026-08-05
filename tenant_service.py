@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from config import config
 from default_templates import build_default_templates
-from phishing_campaign_service import _get_conn, _fetchone_dict, _fetchall_dict
+from phishing_campaign_service import _get_conn, _fetchone_dict, _fetchall_dict, _table_columns
 
 _db_lock = threading.Lock()
 _db_initialized = False
@@ -78,6 +78,19 @@ def _init_db():
             email_configs     TEXT    NOT NULL DEFAULT '[]'
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS tenants (
+            id             TEXT    NOT NULL PRIMARY KEY,
+            company_name   TEXT    NOT NULL,
+            contact_email  TEXT    NOT NULL,
+            contact_mobile TEXT    NOT NULL DEFAULT '',
+            designation    TEXT    NOT NULL DEFAULT '',
+            admin_email    TEXT    NOT NULL,
+            primary_color  TEXT    NOT NULL DEFAULT '#7a1220',
+            status         TEXT    NOT NULL DEFAULT 'active',
+            created_at     TEXT    NOT NULL
+        )
+        """,
     ]
     index_statements = [
         "CREATE INDEX IF NOT EXISTS IX_employees_email ON employees (email)",
@@ -89,6 +102,22 @@ def _init_db():
         cursor = conn.cursor()
         for ddl in ddl_statements:
             cursor.execute(ddl)
+
+        # Multi-tenant isolation columns (idempotent). Existing rows default
+        # to the 'default' tenant so the original single-tenant deployment
+        # keeps working unchanged.
+        employee_cols = _table_columns(cursor, "employees")
+        if "tenant_id" not in employee_cols:
+            cursor.execute("ALTER TABLE employees ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+            cursor.execute("CREATE INDEX IF NOT EXISTS IX_employees_tenant_id ON employees (tenant_id)")
+        template_cols = _table_columns(cursor, "templates")
+        if "tenant_id" not in template_cols:
+            cursor.execute("ALTER TABLE templates ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+        audit_cols = _table_columns(cursor, "audit_logs")
+        if "tenant_id" not in audit_cols:
+            cursor.execute("ALTER TABLE audit_logs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+            cursor.execute("CREATE INDEX IF NOT EXISTS IX_audit_logs_tenant_id ON audit_logs (tenant_id)")
+
         for idx in index_statements:
             cursor.execute(idx)
         # Seed the single settings row if absent.
@@ -142,10 +171,12 @@ def _ensure_db_ready():
 
 
 class TenantService:
-    """Employees, templates, audit logs, and tenant settings (single tenant)."""
+    """Employees, templates, audit logs, and tenant settings - scoped to a
+    single tenant per instance for real multi-tenant data isolation."""
 
-    def __init__(self):
+    def __init__(self, tenant_id: str = "default"):
         _ensure_db_ready()
+        self.tenant_id = tenant_id or "default"
 
     # ------------------------------------------------------------------
     # Employees
@@ -160,9 +191,10 @@ class TenantService:
                    SUM(CASE WHEN r.click_count > 0 THEN 1 ELSE 0 END) AS hits_count
             FROM employees e
             LEFT JOIN recipients r ON r.email = e.email
+            WHERE e.tenant_id = ?
             GROUP BY e.id
             ORDER BY e.created_at DESC
-        """)
+        """, (self.tenant_id,))
         rows = _fetchall_dict(cursor)
         conn.close()
         for row in rows:
@@ -185,6 +217,7 @@ class TenantService:
             "department": department, "manager": manager,
             "risk_rating": risk_rating, "hits_count": 0,
             "total_simulations": 0, "created_at": _utcnow_iso(),
+            "tenant_id": self.tenant_id,
         }
         with _db_lock:
             conn = _get_conn()
@@ -192,10 +225,10 @@ class TenantService:
             cursor.execute("""
                 INSERT INTO employees
                   (id, name, email, department, manager, risk_rating,
-                   hits_count, total_simulations, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   hits_count, total_simulations, created_at, tenant_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (row["id"], row["name"], row["email"], row["department"],
-                  row["manager"], row["risk_rating"], 0, 0, row["created_at"]))
+                  row["manager"], row["risk_rating"], 0, 0, row["created_at"], self.tenant_id))
             conn.commit()
             conn.close()
         return row
@@ -211,8 +244,8 @@ class TenantService:
             conn = _get_conn()
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE employees SET {set_clause} WHERE id = ?",
-                (*fields.values(), employee_id),
+                f"UPDATE employees SET {set_clause} WHERE id = ? AND tenant_id = ?",
+                (*fields.values(), employee_id, self.tenant_id),
             )
             conn.commit()
             conn.close()
@@ -221,7 +254,7 @@ class TenantService:
     def get_employee(self, employee_id: str) -> dict | None:
         conn = _get_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM employees WHERE id = ?", (employee_id,))
+        cursor.execute("SELECT * FROM employees WHERE id = ? AND tenant_id = ?", (employee_id, self.tenant_id))
         row = _fetchone_dict(cursor)
         conn.close()
         return row
@@ -230,7 +263,7 @@ class TenantService:
         with _db_lock:
             conn = _get_conn()
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
+            cursor.execute("DELETE FROM employees WHERE id = ? AND tenant_id = ?", (employee_id, self.tenant_id))
             deleted = cursor.rowcount > 0
             conn.commit()
             conn.close()
@@ -280,7 +313,10 @@ class TenantService:
     def list_templates(self) -> list[dict]:
         conn = _get_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM templates ORDER BY created_at DESC")
+        cursor.execute(
+            "SELECT * FROM templates WHERE tenant_id = ? OR is_global = 1 ORDER BY created_at DESC",
+            (self.tenant_id,),
+        )
         rows = _fetchall_dict(cursor)
         conn.close()
         for row in rows:
@@ -293,7 +329,7 @@ class TenantService:
             "id": str(uuid.uuid4()), "name": name, "category": category,
             "subject": subject, "body": body, "description": description,
             "thumbnail": thumbnail, "is_global": False,
-            "created_at": _utcnow_iso(),
+            "created_at": _utcnow_iso(), "tenant_id": self.tenant_id,
         }
         with _db_lock:
             conn = _get_conn()
@@ -301,10 +337,10 @@ class TenantService:
             cursor.execute("""
                 INSERT INTO templates
                   (id, name, category, subject, body, description, thumbnail,
-                   is_global, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+                   is_global, created_at, tenant_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             """, (row["id"], row["name"], row["category"], row["subject"],
-                  row["body"], row["description"], row["thumbnail"], row["created_at"]))
+                  row["body"], row["description"], row["thumbnail"], row["created_at"], self.tenant_id))
             conn.commit()
             conn.close()
         return row
@@ -313,7 +349,10 @@ class TenantService:
         with _db_lock:
             conn = _get_conn()
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM templates WHERE id = ? AND is_global = 0", (template_id,))
+            cursor.execute(
+                "DELETE FROM templates WHERE id = ? AND is_global = 0 AND tenant_id = ?",
+                (template_id, self.tenant_id),
+            )
             deleted = cursor.rowcount > 0
             conn.commit()
             conn.close()
@@ -326,7 +365,10 @@ class TenantService:
     def list_audit_logs(self) -> list[dict]:
         conn = _get_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 500")
+        cursor.execute(
+            "SELECT * FROM audit_logs WHERE tenant_id = ? ORDER BY timestamp DESC LIMIT 500",
+            (self.tenant_id,),
+        )
         rows = _fetchall_dict(cursor)
         conn.close()
         return [
@@ -343,16 +385,16 @@ class TenantService:
         row = {
             "id": str(uuid.uuid4()), "actor": actor, "category": category,
             "message": message, "ip_address": ip_address,
-            "timestamp": _utcnow_iso(),
+            "timestamp": _utcnow_iso(), "tenant_id": self.tenant_id,
         }
         with _db_lock:
             conn = _get_conn()
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO audit_logs (id, actor, category, message, ip_address, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO audit_logs (id, actor, category, message, ip_address, timestamp, tenant_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (row["id"], row["actor"], row["category"], row["message"],
-                  row["ip_address"], row["timestamp"]))
+                  row["ip_address"], row["timestamp"], self.tenant_id))
             conn.commit()
             conn.close()
         return {
@@ -366,17 +408,54 @@ class TenantService:
     # ------------------------------------------------------------------
 
     def get_settings_raw(self) -> dict:
-        conn = _get_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tenant_settings WHERE id = 1")
-        row = _fetchone_dict(cursor)
-        conn.close()
-        row["domains"] = json.loads(row["domains"] or "[]")
-        row["email_configs"] = json.loads(row["email_configs"] or "[]")
-        return row
+        # The 'default' tenant keeps using the original single-row table for
+        # full backward compatibility (SSO + email configs). Tenants
+        # onboarded later through Super Admin get a lighter-weight settings
+        # shape backed by their own `tenants` row instead - full SSO/email
+        # config customization for them is a follow-up, not built yet.
+        if self.tenant_id == "default":
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM tenant_settings WHERE id = 1")
+            row = _fetchone_dict(cursor)
+            conn.close()
+            row["domains"] = json.loads(row["domains"] or "[]")
+            row["email_configs"] = json.loads(row["email_configs"] or "[]")
+            return row
+
+        tenant = self.get_tenant(self.tenant_id)
+        if not tenant:
+            raise ValueError(f"Unknown tenant: {self.tenant_id}")
+        return {
+            "name": tenant["company_name"],
+            "domains": [],
+            "primary_color": tenant["primary_color"],
+            "logo_url": "",
+            "sso_client_id": "",
+            "sso_tenant_id": "",
+            "sso_client_secret": "",
+            "email_configs": [],
+        }
 
     def save_settings(self, data: dict) -> dict:
         current = self.get_settings_raw()
+
+        if self.tenant_id != "default":
+            # Reduced settings surface for non-default tenants: only branding
+            # color is currently editable (see get_settings_raw note above).
+            branding = data.get("branding", {})
+            primary_color = branding.get("primary_color", current["primary_color"])
+            name = data.get("name", current["name"])
+            with _db_lock:
+                conn = _get_conn()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE tenants SET company_name = ?, primary_color = ? WHERE id = ?",
+                    (name, primary_color, self.tenant_id),
+                )
+                conn.commit()
+                conn.close()
+            return self.get_settings_raw()
 
         name = data.get("name", current["name"])
         domains = data.get("domains", current["domains"])
@@ -437,7 +516,7 @@ class TenantService:
                 "smtp_password_configured": bool(cfg.get("smtp_password")),
             })
         return {
-            "tenant_id": "default",
+            "tenant_id": self.tenant_id,
             "name": raw["name"],
             "domains": raw["domains"],
             "branding": {
@@ -465,10 +544,10 @@ class TenantService:
                    SUM(CASE WHEN r.click_count > 0 THEN 1 ELSE 0 END) AS clicked_count
             FROM employees e
             JOIN recipients r ON r.email = e.email
-            WHERE e.department != ''
+            WHERE e.department != '' AND e.tenant_id = ?
             GROUP BY e.department
             ORDER BY clicked_count DESC
-        """)
+        """, (self.tenant_id,))
         rows = _fetchall_dict(cursor)
         conn.close()
         return [
@@ -488,10 +567,10 @@ class TenantService:
                    c.name AS campaign_name, r.clicked_at, r.opened_at, r.sent_at
             FROM recipients r
             JOIN campaigns c ON c.id = r.campaign_id
-            WHERE r.clicked_at IS NOT NULL OR r.opened_at IS NOT NULL
+            WHERE (r.clicked_at IS NOT NULL OR r.opened_at IS NOT NULL) AND c.tenant_id = ?
             ORDER BY COALESCE(r.clicked_at, r.opened_at) DESC
             LIMIT ?
-        """, (limit,))
+        """, (self.tenant_id, limit))
         rows = _fetchall_dict(cursor)
         conn.close()
         events = []
@@ -507,3 +586,96 @@ class TenantService:
                 "timestamp": timestamp,
             })
         return events
+
+    # ------------------------------------------------------------------
+    # Super Admin: tenant (company) registry. Unlike every method above,
+    # these intentionally ignore self.tenant_id - they operate on the
+    # registry of ALL tenants and are only reachable via routes gated on
+    # the "super_admin" role, never a regular tenant admin.
+    # ------------------------------------------------------------------
+
+    def list_tenants(self) -> list[dict]:
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT t.*,
+                   (SELECT COUNT(*) FROM employees e WHERE e.tenant_id = t.id) AS employee_count,
+                   (SELECT COUNT(*) FROM campaigns c WHERE c.tenant_id = t.id) AS campaign_count
+            FROM tenants t
+            ORDER BY t.created_at DESC
+        """)
+        rows = _fetchall_dict(cursor)
+        conn.close()
+        return rows
+
+    def get_tenant(self, tenant_id: str) -> dict | None:
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tenants WHERE id = ?", (tenant_id,))
+        row = _fetchone_dict(cursor)
+        conn.close()
+        return row
+
+    def create_tenant(self, company_name: str, contact_email: str, admin_email: str,
+                       contact_mobile: str = "", designation: str = "",
+                       primary_color: str = "#7a1220") -> dict:
+        row = {
+            "id": str(uuid.uuid4()), "company_name": company_name,
+            "contact_email": contact_email, "contact_mobile": contact_mobile,
+            "designation": designation, "admin_email": admin_email,
+            "primary_color": primary_color, "status": "active",
+            "created_at": _utcnow_iso(),
+        }
+        with _db_lock:
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO tenants
+                  (id, company_name, contact_email, contact_mobile, designation,
+                   admin_email, primary_color, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (row["id"], row["company_name"], row["contact_email"], row["contact_mobile"],
+                  row["designation"], row["admin_email"], row["primary_color"],
+                  row["status"], row["created_at"]))
+            conn.commit()
+            conn.close()
+        return row
+
+    def update_tenant(self, tenant_id: str, data: dict) -> dict | None:
+        allowed = {"company_name", "contact_email", "contact_mobile", "designation",
+                   "admin_email", "primary_color", "status"}
+        fields = {k: v for k, v in data.items() if k in allowed}
+        if not fields:
+            return self.get_tenant(tenant_id)
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        with _db_lock:
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE tenants SET {set_clause} WHERE id = ?",
+                (*fields.values(), tenant_id),
+            )
+            conn.commit()
+            conn.close()
+        return self.get_tenant(tenant_id)
+
+    def delete_tenant(self, tenant_id: str) -> bool:
+        """Deletes the tenant registry row and all of its scoped data
+        (employees, templates, campaigns/recipients/events, audit logs)."""
+        with _db_lock:
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM campaigns WHERE tenant_id = ?", (tenant_id,))
+            campaign_ids = [r[0] for r in cursor.fetchall()]
+            for cid in campaign_ids:
+                cursor.execute("DELETE FROM events WHERE campaign_id = ?", (cid,))
+                cursor.execute("DELETE FROM recipients WHERE campaign_id = ?", (cid,))
+            cursor.execute("DELETE FROM campaigns WHERE tenant_id = ?", (tenant_id,))
+            cursor.execute("DELETE FROM employees WHERE tenant_id = ?", (tenant_id,))
+            cursor.execute("DELETE FROM templates WHERE tenant_id = ? AND is_global = 0", (tenant_id,))
+            cursor.execute("DELETE FROM audit_logs WHERE tenant_id = ?", (tenant_id,))
+            cursor.execute("DELETE FROM tenants WHERE id = ?", (tenant_id,))
+            deleted = cursor.rowcount > 0
+            conn.commit()
+            conn.close()
+        return deleted

@@ -101,18 +101,21 @@ def _default_email_config() -> dict:
     }
 
 
-def _resolve_email_config(email_config_id: str | None) -> dict:
+def _resolve_email_config(email_config_id: str | None, tenant_id: str = "default") -> dict:
     """Resolve which sender profile a campaign should send through.
 
     Falls back to the global .env config when no profile is selected, the
     referenced profile was deleted, or the tenant settings can't be read —
     a campaign should never fail to send just because of a profile lookup.
+
+    tenant_id must be passed explicitly (not read from the request/session)
+    since this runs from the background send-job thread, which has neither.
     """
     cfg = _default_email_config()
     if not email_config_id:
         return cfg
     try:
-        raw = TenantService().get_settings_raw()
+        raw = TenantService(tenant_id=tenant_id).get_settings_raw()
         match = next((c for c in raw["email_configs"] if c.get("id") == email_config_id), None)
         if not match:
             logging.warning(f"email_config_id {email_config_id} not found – using default gateway")
@@ -206,7 +209,7 @@ def _send_batch(svc, campaign, recipients, label="Send"):
     failed_count = 0
     errors = []
     smtp_conn = None
-    cfg = _resolve_email_config(campaign.get("email_config_id"))
+    cfg = _resolve_email_config(campaign.get("email_config_id"), tenant_id=campaign.get("tenant_id", "default"))
 
     try:
         with _smtp_connection(cfg) as conn:
@@ -279,14 +282,18 @@ def _job_update(campaign_id: str, **fields) -> None:
             job.update(fields)
 
 
-def _run_send_job(campaign_id: str, label: str, do_validate: bool) -> None:
+def _run_send_job(campaign_id: str, label: str, do_validate: bool, tenant_id: str = "default") -> None:
     """Worker that performs validation (optional) + the actual SMTP send.
 
-    Runs in a background thread so the HTTP handler can return immediately.
+    Runs in a background thread so the HTTP handler can return immediately -
+    there's no Flask request/session here, so the caller must pass the
+    already-verified tenant_id explicitly rather than this reading it from
+    a request context that doesn't exist.
+
     Progress + final result are written to _send_jobs[campaign_id].
     """
     try:
-        svc = PhishingCampaignService()
+        svc = PhishingCampaignService(tenant_id=tenant_id)
         campaign = svc.get_campaign(campaign_id)
         if not campaign:
             _job_update(campaign_id, state="error", error="Campaign not found",
@@ -340,7 +347,7 @@ def _run_send_job(campaign_id: str, label: str, do_validate: bool) -> None:
                     finished_at=datetime.now(timezone.utc).isoformat())
 
 
-def _start_send_job(campaign_id: str, label: str, queued: int, do_validate: bool) -> bool:
+def _start_send_job(campaign_id: str, label: str, queued: int, do_validate: bool, tenant_id: str = "default") -> bool:
     """Register and start a background send job. Returns False if one is already
     running for this campaign."""
     now = datetime.now(timezone.utc).isoformat()
@@ -364,7 +371,7 @@ def _start_send_job(campaign_id: str, label: str, queued: int, do_validate: bool
         }
     t = threading.Thread(
         target=_run_send_job,
-        args=(campaign_id, label, do_validate),
+        args=(campaign_id, label, do_validate, tenant_id),
         name=f"send-{campaign_id[:8]}",
         daemon=True,
     )
@@ -381,6 +388,11 @@ def _start_send_job(campaign_id: str, label: str, queued: int, do_validate: bool
 def _scheduler_loop():
     while True:
         try:
+            # No Flask request context exists in this background thread, so
+            # _get_tenant_id() would crash here - this instance's tenant_id
+            # is unused anyway since list_due_scheduled_campaigns/
+            # list_recipients/set_scheduled_at all operate across every
+            # tenant or take campaign_id directly, never self.tenant_id.
             svc = PhishingCampaignService()
             for campaign in svc.list_due_scheduled_campaigns():
                 recipients_list = svc.list_recipients(campaign["id"])
@@ -388,7 +400,8 @@ def _scheduler_loop():
                 svc.set_scheduled_at(campaign["id"], None)
                 if not to_send:
                     continue
-                started = _start_send_job(campaign["id"], label="Scheduled Send", queued=len(to_send), do_validate=True)
+                started = _start_send_job(campaign["id"], label="Scheduled Send", queued=len(to_send),
+                                           do_validate=True, tenant_id=campaign["tenant_id"])
                 if started:
                     _log_audit("CAMPAIGN", f"Scheduled campaign \"{campaign['name']}\" launched to {len(to_send)} recipient(s)")
         except Exception:
@@ -579,6 +592,8 @@ def handle_exception(e):
 # ---------------------------------------------------------------------------
 
 _ROLE_PERMISSIONS = {
+    "super_admin":     {"dashboard", "view_campaigns", "create_campaign", "view_recipients", "add_recipients", "send", "report", "manage_users",
+                         "manage_employees", "manage_templates", "manage_settings", "view_audit_logs", "manage_tenants"},
     "admin":           {"dashboard", "view_campaigns", "create_campaign", "view_recipients", "add_recipients", "send", "report", "manage_users",
                          "manage_employees", "manage_templates", "manage_settings", "view_audit_logs"},
     "operator":        {"dashboard", "view_campaigns", "create_campaign", "view_recipients", "add_recipients", "send", "report",
@@ -588,6 +603,7 @@ _ROLE_PERMISSIONS = {
 }
 
 _ROLE_LABELS = {
+    "super_admin": "Super Admin",
     "admin": "Admin",
     "operator": "Operator",
     "auditor": "Auditor",
@@ -609,12 +625,22 @@ def _get_session_info() -> dict | None:
     if role not in _ROLE_LABELS:
         return None
     return {"role": role, "username": user.get("name") or user.get("email", "Clerk User"),
-            "label": _ROLE_LABELS.get(role, role)}
+            "label": _ROLE_LABELS.get(role, role),
+            "tenant_id": user.get("tenant_id") or "default"}
 
 
 def _get_role() -> str | None:
     info = _get_session_info()
     return info["role"] if info else None
+
+
+def _get_tenant_id() -> str:
+    """Which company's data the current admin should see. Super Admin routes
+    that operate across all tenants never call this - everything else does,
+    including passing it into PhishingCampaignService/TenantService so every
+    query is scoped automatically."""
+    info = _get_session_info()
+    return info["tenant_id"] if info else "default"
 
 
 def _can(role: str | None, permission: str) -> bool:
@@ -638,7 +664,8 @@ def _log_audit(category: str, message: str) -> None:
     try:
         info = _get_session_info()
         actor = info["username"] if info else "system"
-        TenantService().create_audit_log(
+        tenant_id = info["tenant_id"] if info else "default"
+        TenantService(tenant_id=tenant_id).create_audit_log(
             actor=actor, category=category, message=message,
             ip_address=request.remote_addr or "",
         )
@@ -764,7 +791,7 @@ def _validate_email_address(email: str) -> dict:
 
 def _dispatch_single_email(svc: PhishingCampaignService, campaign: dict, recipient: dict,
                            email_cfg: dict | None = None, _conn: smtplib.SMTP | None = None) -> None:
-    email_cfg = email_cfg or _resolve_email_config(campaign.get("email_config_id"))
+    email_cfg = email_cfg or _resolve_email_config(campaign.get("email_config_id"), tenant_id=campaign.get("tenant_id", "default"))
     phishing_cfg = config.get_phishing_config()
     base_url = phishing_cfg["base_url"].rstrip("/")
     tracking_pixel_url = f"{base_url}/api/track/open/{recipient['tracking_token']}"
@@ -938,7 +965,7 @@ def campaigns():
         if not _can(role, "create_campaign"):
             return _unauthorized() if not role else _forbidden("create_campaign")
     try:
-        svc = PhishingCampaignService()
+        svc = PhishingCampaignService(tenant_id=_get_tenant_id())
         if request.method == "GET":
             return _json_response(svc.list_campaigns())
         try:
@@ -969,7 +996,7 @@ def campaign_detail(campaign_id):
     if request.method == "DELETE":
         if not _can(role, "create_campaign"):
             return _unauthorized() if not role else _forbidden("delete_campaign")
-        svc = PhishingCampaignService()
+        svc = PhishingCampaignService(tenant_id=_get_tenant_id())
         existing = svc.get_campaign(campaign_id)
         ok = svc.delete_campaign(campaign_id)
         if not ok:
@@ -978,7 +1005,7 @@ def campaign_detail(campaign_id):
         return _json_response({"message": "Campaign deleted"})
     if not _can(role, "view_campaigns"):
         return _unauthorized() if not role else _forbidden("view_campaigns")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     stats = svc.get_dashboard_stats(campaign_id)
     if not stats:
         return _json_response({"error": "Campaign not found"}, 404)
@@ -1000,7 +1027,7 @@ def recipients(campaign_id):
     else:
         if not _can(role, "add_recipients"):
             return _unauthorized() if not role else _forbidden("add_recipients")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     if request.method == "GET":
         return _json_response(svc.list_recipients(campaign_id))
     try:
@@ -1047,7 +1074,7 @@ def delete_recipient(campaign_id, recipient_id):
     role = _get_role()
     if not _can(role, "add_recipients"):
         return _unauthorized() if not role else _forbidden("add_recipients")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     target = next((r for r in svc.list_recipients(campaign_id) if r["id"] == recipient_id), None)
     ok = svc.delete_recipient(recipient_id)
     if not ok:
@@ -1068,7 +1095,7 @@ def validate_recipients(campaign_id):
     role = _get_role()
     if not _can(role, "send"):
         return _unauthorized() if not role else _forbidden("send")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     campaign = svc.get_campaign(campaign_id)
     if not campaign:
         return _json_response({"error": "Campaign not found"}, 404)
@@ -1138,7 +1165,7 @@ def resend_campaign(campaign_id):
     role = _get_role()
     if not _can(role, "send"):
         return _unauthorized() if not role else _forbidden("send")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     campaign = svc.get_campaign(campaign_id)
     if not campaign:
         return _json_response({"error": "Campaign not found"}, 404)
@@ -1170,7 +1197,7 @@ def send_campaign(campaign_id):
     role = _get_role()
     if not _can(role, "send"):
         return _unauthorized() if not role else _forbidden("send")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     campaign = svc.get_campaign(campaign_id)
     if not campaign:
         return _json_response({"error": "Campaign not found"}, 404)
@@ -1201,7 +1228,7 @@ def schedule_campaign(campaign_id):
     role = _get_role()
     if not _can(role, "send"):
         return _unauthorized() if not role else _forbidden("send")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     campaign = svc.get_campaign(campaign_id)
     if not campaign:
         return _json_response({"error": "Campaign not found"}, 404)
@@ -1251,7 +1278,7 @@ def resend_failed_campaign(campaign_id):
     role = _get_role()
     if not _can(role, "send"):
         return _unauthorized() if not role else _forbidden("send")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     campaign = svc.get_campaign(campaign_id)
     if not campaign:
         return _json_response({"error": "Campaign not found"}, 404)
@@ -1281,7 +1308,7 @@ def clear_failed(campaign_id):
     role = _get_role()
     if not _can(role, "send"):
         return _unauthorized() if not role else _forbidden("send")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     cleared = svc.clear_failed_recipients(campaign_id)
     return _json_response({"cleared": cleared, "campaign_id": campaign_id})
 
@@ -1297,7 +1324,7 @@ def clear_duplicates(campaign_id):
     role = _get_role()
     if not _can(role, "send"):
         return _unauthorized() if not role else _forbidden("send")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     cleared = svc.clear_duplicate_count(campaign_id)
     return _json_response({"cleared": cleared, "campaign_id": campaign_id})
 
@@ -1477,7 +1504,7 @@ def track_open(token):
     _log_tracking_hit("open", token)
     is_bot, reason = _is_bot_request()
     try:
-        svc = PhishingCampaignService()
+        svc = PhishingCampaignService(tenant_id=_get_tenant_id())
         if is_bot:
             logging.info(f"  -> SKIPPED open (bot/scanner): {reason}")
             return Response(_TRACKING_PIXEL, mimetype="image/png",
@@ -1516,7 +1543,7 @@ def track_click(token):
     _log_tracking_hit("click", token)
     redirect_to = fallback_url
     try:
-        svc = PhishingCampaignService()
+        svc = PhishingCampaignService(tenant_id=_get_tenant_id())
         is_bot, reason = _is_bot_request()
         elapsed = _seconds_since_sent(svc, token)
         if is_bot:
@@ -1575,7 +1602,7 @@ def phishing_landing(token):
     if valid_token:
         _log_tracking_hit("landing-render", token)
         try:
-            svc = PhishingCampaignService()
+            svc = PhishingCampaignService(tenant_id=_get_tenant_id())
             url = svc.get_redirect_url_for_token(token)
             if url:
                 redirect_to = url
@@ -1639,7 +1666,7 @@ def track_ping(token):
         return _json_response({"ok": False})
     _log_tracking_hit("ping", token)
     try:
-        svc = PhishingCampaignService()
+        svc = PhishingCampaignService(tenant_id=_get_tenant_id())
         is_bot, reason = _is_bot_request()
         elapsed = _seconds_since_sent(svc, token)
         if is_bot:
@@ -1673,7 +1700,7 @@ def download_report(campaign_id):
     role = _get_role()
     if not _can(role, "report"):
         return _unauthorized() if not role else _forbidden("report")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     campaign = svc.get_campaign(campaign_id)
     if not campaign:
         return _json_response({"error": "Campaign not found"}, 404)
@@ -1692,7 +1719,7 @@ def campaign_device_stats(campaign_id):
     role = _get_role()
     if not _can(role, "view_campaigns"):
         return _unauthorized() if not role else _forbidden("view_campaigns")
-    svc = PhishingCampaignService()
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
     campaign = svc.get_campaign(campaign_id)
     if not campaign:
         return _json_response({"error": "Campaign not found"}, 404)
@@ -1711,7 +1738,7 @@ def dashboard_summary():
     if not _can(role, "dashboard"):
         return _unauthorized() if not role else _forbidden("dashboard")
     try:
-        svc = PhishingCampaignService()
+        svc = PhishingCampaignService(tenant_id=_get_tenant_id())
         campaigns_list = svc.list_campaigns()
         summary = []
         for c in campaigns_list:
@@ -1732,7 +1759,7 @@ def analytics_overview():
     if not _can(role, "dashboard"):
         return _unauthorized() if not role else _forbidden("dashboard")
     try:
-        svc = TenantService()
+        svc = TenantService(tenant_id=_get_tenant_id())
         return _json_response({
             "department_rates": svc.get_department_click_rates(),
             "recent_events": svc.get_recent_risk_events(limit=5),
@@ -1844,7 +1871,7 @@ def employees():
     if not _can(role, "manage_employees"):
         return _unauthorized() if not role else _forbidden("manage_employees")
     try:
-        svc = TenantService()
+        svc = TenantService(tenant_id=_get_tenant_id())
         if request.method == "GET":
             return _json_response(svc.list_employees())
         body = request.get_json(force=True, silent=True) or {}
@@ -1875,7 +1902,7 @@ def employee_detail(employee_id):
     if not _can(role, "manage_employees"):
         return _unauthorized() if not role else _forbidden("manage_employees")
     try:
-        svc = TenantService()
+        svc = TenantService(tenant_id=_get_tenant_id())
         if request.method == "DELETE":
             existing = svc.get_employee(employee_id)
             deleted = svc.delete_employee(employee_id)
@@ -1905,7 +1932,7 @@ def import_employees():
     if not file or not file.filename:
         return _json_response({"error": "No file provided"}, 400)
     try:
-        result = TenantService().import_employees_csv(file.read())
+        result = TenantService(tenant_id=_get_tenant_id()).import_employees_csv(file.read())
         _log_audit(
             "EMPLOYEE",
             f"CSV import: {result['success_count']} added, "
@@ -1933,7 +1960,7 @@ def templates():
         if not _can(role, "manage_templates"):
             return _unauthorized() if not role else _forbidden("manage_templates")
     try:
-        svc = TenantService()
+        svc = TenantService(tenant_id=_get_tenant_id())
         if request.method == "GET":
             return _json_response(svc.list_templates())
         body = request.get_json(force=True, silent=True) or {}
@@ -1963,7 +1990,7 @@ def template_detail(template_id):
     if not _can(role, "manage_templates"):
         return _unauthorized() if not role else _forbidden("manage_templates")
     try:
-        svc = TenantService()
+        svc = TenantService(tenant_id=_get_tenant_id())
         existing = next((t for t in svc.list_templates() if (t.get("id") == template_id)), None)
         deleted = svc.delete_template(template_id)
         if not deleted:
@@ -1987,7 +2014,7 @@ def audit_logs():
     if not _can(role, "view_audit_logs"):
         return _unauthorized() if not role else _forbidden("view_audit_logs")
     try:
-        svc = TenantService()
+        svc = TenantService(tenant_id=_get_tenant_id())
         if request.method == "GET":
             return _json_response(svc.list_audit_logs())
         body = request.get_json(force=True, silent=True) or {}
@@ -2021,7 +2048,7 @@ def tenant_settings():
         if not _can(role, "manage_settings"):
             return _unauthorized() if not role else _forbidden("manage_settings")
     try:
-        svc = TenantService()
+        svc = TenantService(tenant_id=_get_tenant_id())
         if request.method == "GET":
             return _json_response(svc.to_frontend_shape())
         body = request.get_json(force=True, silent=True) or {}
@@ -2150,12 +2177,98 @@ def admin_allowlist_delete(identifier_id):
     return _json_response(resp.json() if resp.content else {"deleted": True}, resp.status_code)
 
 
+@app.route("/api/admin/tenants", methods=["GET", "POST", "OPTIONS"])
+def admin_tenants():
+    """Super Admin's company registry: onboard a new client company (creates
+    an isolated tenant_id + invites its first admin via Clerk, pre-tagged
+    with that tenant_id so they land in the right company's data on their
+    first login) and list existing ones."""
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_tenants"):
+        return _unauthorized() if not role else _forbidden("manage_tenants")
+    svc = TenantService()  # registry methods operate across all tenants regardless of constructor arg
+
+    if request.method == "GET":
+        return _json_response(svc.list_tenants())
+
+    body = request.get_json(force=True, silent=True) or {}
+    company_name = (body.get("company_name") or "").strip()
+    contact_email = (body.get("contact_email") or "").strip().lower()
+    admin_email = (body.get("admin_email") or contact_email).strip().lower()
+    contact_mobile = (body.get("contact_mobile") or "").strip()
+    designation = (body.get("designation") or "").strip()
+    primary_color = (body.get("primary_color") or "#7a1220").strip()
+    if not company_name or not contact_email or not admin_email:
+        return _json_response({"error": "Company name, contact email, and admin email are required"}, 400)
+
+    tenant = svc.create_tenant(
+        company_name=company_name, contact_email=contact_email, admin_email=admin_email,
+        contact_mobile=contact_mobile, designation=designation, primary_color=primary_color,
+    )
+
+    invite_warning = None
+    if config.CLERK_SECRET_KEY:
+        resp = requests.post(
+            f"{_CLERK_API_BASE}/invitations",
+            headers=_clerk_headers(),
+            json={
+                "email_address": admin_email,
+                "public_metadata": {"role": "admin", "tenant_id": tenant["id"]},
+                "notify": True,
+                "ignore_existing": True,
+            },
+            timeout=15,
+        )
+        if resp.status_code >= 400:
+            invite_warning = f"Company created, but the invite email failed: {resp.json().get('errors', resp.text)}"
+    else:
+        invite_warning = "Company created, but Clerk is not configured on this server so no invite was sent."
+
+    _log_audit("TENANT", f"Onboarded company \"{company_name}\" (admin: {admin_email})")
+    result = dict(tenant)
+    if invite_warning:
+        result["invite_warning"] = invite_warning
+    return _json_response(result, 201)
+
+
+@app.route("/api/admin/tenants/<tenant_id>", methods=["PUT", "DELETE", "OPTIONS"])
+def admin_tenant_detail(tenant_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_tenants"):
+        return _unauthorized() if not role else _forbidden("manage_tenants")
+    if tenant_id == "default":
+        return _json_response({"error": "The default tenant can't be edited or deleted here"}, 400)
+    svc = TenantService()
+
+    if request.method == "DELETE":
+        deleted = svc.delete_tenant(tenant_id)
+        if not deleted:
+            return _json_response({"error": "Company not found"}, 404)
+        _log_audit("TENANT", f"Deleted company {tenant_id} and all of its data")
+        return _json_response({"message": "Company deleted"})
+
+    body = request.get_json(force=True, silent=True) or {}
+    updates = {}
+    for key in ("company_name", "contact_email", "contact_mobile", "designation", "admin_email", "primary_color", "status"):
+        if key in body:
+            updates[key] = body[key]
+    tenant = svc.update_tenant(tenant_id, updates)
+    if not tenant:
+        return _json_response({"error": "Company not found"}, 404)
+    _log_audit("TENANT", f"Updated company \"{tenant['company_name']}\"")
+    return _json_response(tenant)
+
+
 @app.route("/api/auth/branding", methods=["GET", "OPTIONS"])
 def branding():
     if request.method == "OPTIONS":
         return "", 200
     try:
-        raw = TenantService().get_settings_raw()
+        raw = TenantService(tenant_id=_get_tenant_id()).get_settings_raw()
         return _json_response({
             "tenant_id": "default",
             "tenant_name": raw["name"],

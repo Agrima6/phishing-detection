@@ -70,9 +70,15 @@ def clerk_session():
     # Any signed-in Clerk user gets full access by default - no per-user Dashboard
     # step required. Set public_metadata {"role": "operator"/"auditor"/"template_author"}
     # on a specific user in the Clerk Dashboard to give them reduced access instead.
-    role = (clerk_user.public_metadata or {}).get("role") or "admin"
+    metadata = clerk_user.public_metadata or {}
+    role = metadata.get("role") or "admin"
+    # Which company's data this admin sees. Set via public_metadata.tenant_id
+    # when the account is invited (see Super Admin's "onboard company" flow);
+    # absent for pre-existing accounts, which fall back to the original
+    # single-tenant data under tenant_id "default".
+    tenant_id = metadata.get("tenant_id") or "default"
 
-    user_data = {"id": user_id, "name": name, "email": email, "role": role}
+    user_data = {"id": user_id, "name": name, "email": email, "role": role, "tenant_id": tenant_id}
     session["clerk_user"] = user_data
 
     logger.info(f"Clerk login successful for {email} (role={role or 'none'})")
