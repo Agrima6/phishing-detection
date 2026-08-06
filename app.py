@@ -2293,6 +2293,7 @@ def admin_tenants():
                 "public_metadata": {"role": "admin", "tenant_id": tenant["id"]},
                 "notify": True,
                 "ignore_existing": True,
+                "redirect_url": f"{config.FRONTEND_URL}/auth/welcome",
             },
             timeout=15,
         )

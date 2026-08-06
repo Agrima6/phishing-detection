@@ -13,6 +13,11 @@ class Config:
         # ── Chatbot (Gemini Generative Language API) ─────────────────────────
         self.GEMINI_CHATBOT_API_KEY = os.environ.get('GEMINI_CHATBOT_API_KEY', '')
 
+        # ── Frontend URL - used to build links that must point at the app
+        # itself (e.g. where a Clerk invitation email sends the user after
+        # they accept, since Clerk doesn't know this on its own) ────────────
+        self.FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+
         # ── Email provider switch ────────────────────────────────────────────
         # Set to 'sendgrid', 'gmail', or 'outlook'
         self.EMAIL_PROVIDER = os.environ.get('EMAIL_PROVIDER', 'sendgrid').lower()
