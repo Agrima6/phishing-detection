@@ -10,9 +10,6 @@ class Config:
         self._load_config()
 
     def _load_config(self):
-        # ── Chatbot (Gemini Generative Language API) ─────────────────────────
-        self.GEMINI_CHATBOT_API_KEY = os.environ.get('GEMINI_CHATBOT_API_KEY', '')
-
         # ── Frontend URL - used to build links that must point at the app
         # itself (e.g. where a Clerk invitation email sends the user after
         # they accept, since Clerk doesn't know this on its own) ────────────
