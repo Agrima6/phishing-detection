@@ -47,6 +47,7 @@ def _init_db():
             id          TEXT    NOT NULL PRIMARY KEY,
             name        TEXT    NOT NULL,
             category    TEXT    NOT NULL,
+            theme       TEXT    NOT NULL DEFAULT '',
             subject     TEXT    NOT NULL,
             body        TEXT    NOT NULL,
             description TEXT    NOT NULL DEFAULT '',
@@ -82,6 +83,7 @@ def _init_db():
         CREATE TABLE IF NOT EXISTS tenants (
             id             TEXT    NOT NULL PRIMARY KEY,
             company_name   TEXT    NOT NULL,
+            contact_name   TEXT    NOT NULL DEFAULT '',
             contact_email  TEXT    NOT NULL,
             contact_mobile TEXT    NOT NULL DEFAULT '',
             designation    TEXT    NOT NULL DEFAULT '',
@@ -113,10 +115,15 @@ def _init_db():
         template_cols = _table_columns(cursor, "templates")
         if "tenant_id" not in template_cols:
             cursor.execute("ALTER TABLE templates ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+        if "theme" not in template_cols:
+            cursor.execute("ALTER TABLE templates ADD COLUMN theme TEXT NOT NULL DEFAULT ''")
         audit_cols = _table_columns(cursor, "audit_logs")
         if "tenant_id" not in audit_cols:
             cursor.execute("ALTER TABLE audit_logs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
             cursor.execute("CREATE INDEX IF NOT EXISTS IX_audit_logs_tenant_id ON audit_logs (tenant_id)")
+        tenants_cols = _table_columns(cursor, "tenants")
+        if "contact_name" not in tenants_cols:
+            cursor.execute("ALTER TABLE tenants ADD COLUMN contact_name TEXT NOT NULL DEFAULT ''")
 
         for idx in index_statements:
             cursor.execute(idx)
@@ -139,12 +146,13 @@ def _init_db():
             cursor.execute("SELECT COUNT(*) FROM templates WHERE name = ?", (tmpl["name"],))
             if cursor.fetchone()[0] == 0:
                 cursor.execute(
-                    "INSERT INTO templates (id, name, category, subject, body, description, "
-                    "thumbnail, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO templates (id, name, category, theme, subject, body, description, "
+                    "thumbnail, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         str(uuid.uuid4()),
                         tmpl["name"],
                         tmpl["category"],
+                        tmpl.get("theme", ""),
                         tmpl["subject"],
                         tmpl["body"],
                         tmpl["description"],
@@ -152,6 +160,14 @@ def _init_db():
                         1,
                         _utcnow_iso(),
                     ),
+                )
+            elif tmpl.get("theme"):
+                # Backfill theme on pre-existing global templates seeded before
+                # the theme column existed, without touching any tenant's own
+                # custom (non-global) templates that happen to share a name.
+                cursor.execute(
+                    "UPDATE templates SET theme = ? WHERE name = ? AND is_global = 1 AND (theme IS NULL OR theme = '')",
+                    (tmpl["theme"], tmpl["name"]),
                 )
 
         conn.commit()
@@ -324,9 +340,9 @@ class TenantService:
         return rows
 
     def create_template(self, name: str, category: str, subject: str, body: str,
-                         description: str = "", thumbnail: str = "") -> dict:
+                         description: str = "", thumbnail: str = "", theme: str = "") -> dict:
         row = {
-            "id": str(uuid.uuid4()), "name": name, "category": category,
+            "id": str(uuid.uuid4()), "name": name, "category": category, "theme": theme,
             "subject": subject, "body": body, "description": description,
             "thumbnail": thumbnail, "is_global": False,
             "created_at": _utcnow_iso(), "tenant_id": self.tenant_id,
@@ -336,10 +352,10 @@ class TenantService:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO templates
-                  (id, name, category, subject, body, description, thumbnail,
+                  (id, name, category, theme, subject, body, description, thumbnail,
                    is_global, created_at, tenant_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-            """, (row["id"], row["name"], row["category"], row["subject"],
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """, (row["id"], row["name"], row["category"], row["theme"], row["subject"],
                   row["body"], row["description"], row["thumbnail"], row["created_at"], self.tenant_id))
             conn.commit()
             conn.close()
@@ -617,10 +633,11 @@ class TenantService:
         return row
 
     def create_tenant(self, company_name: str, contact_email: str, admin_email: str,
-                       contact_mobile: str = "", designation: str = "",
+                       contact_name: str = "", contact_mobile: str = "", designation: str = "",
                        primary_color: str = "#7a1220") -> dict:
         row = {
             "id": str(uuid.uuid4()), "company_name": company_name,
+            "contact_name": contact_name,
             "contact_email": contact_email, "contact_mobile": contact_mobile,
             "designation": designation, "admin_email": admin_email,
             "primary_color": primary_color, "status": "active",
@@ -631,10 +648,10 @@ class TenantService:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO tenants
-                  (id, company_name, contact_email, contact_mobile, designation,
+                  (id, company_name, contact_name, contact_email, contact_mobile, designation,
                    admin_email, primary_color, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (row["id"], row["company_name"], row["contact_email"], row["contact_mobile"],
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (row["id"], row["company_name"], row["contact_name"], row["contact_email"], row["contact_mobile"],
                   row["designation"], row["admin_email"], row["primary_color"],
                   row["status"], row["created_at"]))
             conn.commit()
@@ -642,7 +659,7 @@ class TenantService:
         return row
 
     def update_tenant(self, tenant_id: str, data: dict) -> dict | None:
-        allowed = {"company_name", "contact_email", "contact_mobile", "designation",
+        allowed = {"company_name", "contact_name", "contact_email", "contact_mobile", "designation",
                    "admin_email", "primary_color", "status"}
         fields = {k: v for k, v in data.items() if k in allowed}
         if not fields:

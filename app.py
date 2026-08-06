@@ -2049,6 +2049,7 @@ def templates():
             name=name, category=category, subject=subject, body=template_body,
             description=(body.get("description") or ""),
             thumbnail=(body.get("thumbnail") or ""),
+            theme=(body.get("theme") or ""),
         )
         _log_audit("CAMPAIGN", f"Template \"{name}\" created")
         return _json_response(template, 201)
@@ -2270,6 +2271,7 @@ def admin_tenants():
 
     body = request.get_json(force=True, silent=True) or {}
     company_name = (body.get("company_name") or "").strip()
+    contact_name = (body.get("contact_name") or "").strip()
     contact_email = (body.get("contact_email") or "").strip().lower()
     admin_email = (body.get("admin_email") or contact_email).strip().lower()
     contact_mobile = (body.get("contact_mobile") or "").strip()
@@ -2280,7 +2282,8 @@ def admin_tenants():
 
     tenant = svc.create_tenant(
         company_name=company_name, contact_email=contact_email, admin_email=admin_email,
-        contact_mobile=contact_mobile, designation=designation, primary_color=primary_color,
+        contact_name=contact_name, contact_mobile=contact_mobile, designation=designation,
+        primary_color=primary_color,
     )
 
     invite_warning = None
@@ -2329,7 +2332,7 @@ def admin_tenant_detail(tenant_id):
 
     body = request.get_json(force=True, silent=True) or {}
     updates = {}
-    for key in ("company_name", "contact_email", "contact_mobile", "designation", "admin_email", "primary_color", "status"):
+    for key in ("company_name", "contact_name", "contact_email", "contact_mobile", "designation", "admin_email", "primary_color", "status"):
         if key in body:
             updates[key] = body[key]
     tenant = svc.update_tenant(tenant_id, updates)

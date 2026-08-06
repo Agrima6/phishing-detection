@@ -112,6 +112,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "IT Password Expiration Notice",
             "category": "credential-harvester",
+            "theme": "IT & Security",
             "subject": "Action Required: Your Password Expires in 24 Hours",
             "description": 'Simulates a corporate IT password-expiration alert to test whether employees click a suspicious "update password" link.',
             "thumbnail": banner_image_url,
@@ -120,6 +121,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "Microsoft 365 Unusual Sign-in Activity",
             "category": "credential-harvester",
+            "theme": "IT & Security",
             "subject": "Unusual sign-in activity detected on your Microsoft account",
             "description": "Impersonates a Microsoft security alert about a sign-in from an unrecognized device, pressuring the recipient to verify their identity.",
             "thumbnail": "",
@@ -136,6 +138,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "Shared Document via OneDrive",
             "category": "link-click",
+            "theme": "Productivity & Collaboration",
             "subject": "\"Q4 Budget Review.xlsx\" has been shared with you",
             "description": "Mimics a routine file-share notification to test whether employees click links to open documents from unverified sources.",
             "thumbnail": "",
@@ -152,6 +155,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "Payroll Direct Deposit Update Required",
             "category": "credential-harvester",
+            "theme": "Finance & Payroll",
             "subject": "Action Needed: Confirm Your Direct Deposit Details",
             "description": "A finance/HR-themed lure claiming payroll details need re-verification, aiming to harvest banking credentials.",
             "thumbnail": "",
@@ -168,6 +172,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "Package Delivery Failed",
             "category": "link-click",
+            "theme": "Shipping & Delivery",
             "subject": "We couldn't deliver your package - action required",
             "description": "Courier-style delivery-failure notice, a very common real-world phishing lure that relies on urgency and curiosity.",
             "thumbnail": "",
@@ -184,6 +189,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "Annual Benefits Enrollment Deadline",
             "category": "credential-harvester",
+            "theme": "HR & Benefits",
             "subject": "Reminder: Benefits Enrollment Closes This Friday",
             "description": "HR open-enrollment reminder used to lure employees into logging into a fake benefits portal before a fabricated deadline.",
             "thumbnail": "",
@@ -200,6 +206,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "VPN Client Security Update Required",
             "category": "credential-harvester",
+            "theme": "IT & Security",
             "subject": "Critical: VPN client update required to maintain access",
             "description": "IT-themed lure requiring re-authentication to \"update\" VPN software, targeting remote-work credentials.",
             "thumbnail": "",
@@ -216,6 +223,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "Zoom Meeting Recording Shared",
             "category": "link-click",
+            "theme": "Productivity & Collaboration",
             "subject": "Recording ready: \"Weekly Team Sync\"",
             "description": "Mimics a meeting-recording notification, a common lure exploiting the routine habit of clicking meeting links.",
             "thumbnail": "",
@@ -232,6 +240,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "HR Policy Acknowledgment Required",
             "category": "link-click",
+            "theme": "HR & Benefits",
             "subject": "Action Required: Acknowledge Updated Code of Conduct",
             "description": "Compliance-themed lure requiring employees to click through to \"acknowledge\" a policy update.",
             "thumbnail": "",
@@ -248,6 +257,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "Suspicious Login Attempt Detected",
             "category": "credential-harvester",
+            "theme": "IT & Security",
             "subject": "Security Alert: We stopped a suspicious login to your account",
             "description": "Generic security-alert style lure used across many real phishing kits impersonating account-protection notices.",
             "thumbnail": "",
@@ -264,6 +274,7 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
         {
             "name": "Invoice Payment Overdue",
             "category": "link-click",
+            "theme": "Finance & Payroll",
             "subject": "Invoice #INV-20458 is now overdue - immediate action required",
             "description": "Accounts-payable themed lure pressuring finance staff to click through to view/pay a fabricated overdue invoice.",
             "thumbnail": "",
