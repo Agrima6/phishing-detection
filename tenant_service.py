@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from config import config
 from default_templates import build_default_templates
-from phishing_campaign_service import _get_conn, _fetchone_dict, _fetchall_dict, _table_columns
+from phishing_campaign_service import _get_conn, _fetchone_dict, _fetchall_dict, _table_columns, _using_postgres
 
 _db_lock = threading.Lock()
 _db_initialized = False
@@ -123,98 +123,115 @@ def _init_db():
 
     with _db_lock:
         conn = _get_conn()
-        cursor = conn.cursor()
-        for ddl in ddl_statements:
-            cursor.execute(ddl)
+        try:
+            cursor = conn.cursor()
+            if _using_postgres():
+                # Every gunicorn worker process has its own in-memory
+                # _db_initialized flag, so all of them race to run this DDL
+                # on the first request after a restart. Without this lock,
+                # concurrent CREATE TABLE IF NOT EXISTS statements can raise
+                # a duplicate key error on Postgres's pg_type catalog, since
+                # the existence check and the catalog insert aren't atomic
+                # across sessions. This transaction-scoped lock serializes
+                # them and releases itself automatically on commit/rollback.
+                cursor.execute("SELECT pg_advisory_xact_lock(727310)")
+            for ddl in ddl_statements:
+                cursor.execute(ddl)
 
-        # Multi-tenant isolation columns (idempotent). Existing rows default
-        # to the 'default' tenant so the original single-tenant deployment
-        # keeps working unchanged.
-        employee_cols = _table_columns(cursor, "employees")
-        if "tenant_id" not in employee_cols:
-            cursor.execute("ALTER TABLE employees ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
-            cursor.execute("CREATE INDEX IF NOT EXISTS IX_employees_tenant_id ON employees (tenant_id)")
-        template_cols = _table_columns(cursor, "templates")
-        if "tenant_id" not in template_cols:
-            cursor.execute("ALTER TABLE templates ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
-        if "theme" not in template_cols:
-            cursor.execute("ALTER TABLE templates ADD COLUMN theme TEXT NOT NULL DEFAULT ''")
-        audit_cols = _table_columns(cursor, "audit_logs")
-        if "tenant_id" not in audit_cols:
-            cursor.execute("ALTER TABLE audit_logs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
-            cursor.execute("CREATE INDEX IF NOT EXISTS IX_audit_logs_tenant_id ON audit_logs (tenant_id)")
-        tenants_cols = _table_columns(cursor, "tenants")
-        if "contact_name" not in tenants_cols:
-            cursor.execute("ALTER TABLE tenants ADD COLUMN contact_name TEXT NOT NULL DEFAULT ''")
+            # Multi-tenant isolation columns (idempotent). Existing rows default
+            # to the 'default' tenant so the original single-tenant deployment
+            # keeps working unchanged.
+            employee_cols = _table_columns(cursor, "employees")
+            if "tenant_id" not in employee_cols:
+                cursor.execute("ALTER TABLE employees ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+                cursor.execute("CREATE INDEX IF NOT EXISTS IX_employees_tenant_id ON employees (tenant_id)")
+            template_cols = _table_columns(cursor, "templates")
+            if "tenant_id" not in template_cols:
+                cursor.execute("ALTER TABLE templates ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+            if "theme" not in template_cols:
+                cursor.execute("ALTER TABLE templates ADD COLUMN theme TEXT NOT NULL DEFAULT ''")
+            audit_cols = _table_columns(cursor, "audit_logs")
+            if "tenant_id" not in audit_cols:
+                cursor.execute("ALTER TABLE audit_logs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+                cursor.execute("CREATE INDEX IF NOT EXISTS IX_audit_logs_tenant_id ON audit_logs (tenant_id)")
+            tenants_cols = _table_columns(cursor, "tenants")
+            if "contact_name" not in tenants_cols:
+                cursor.execute("ALTER TABLE tenants ADD COLUMN contact_name TEXT NOT NULL DEFAULT ''")
 
-        for idx in index_statements:
-            cursor.execute(idx)
-        # Seed the single settings row if absent.
-        cursor.execute("SELECT COUNT(*) FROM tenant_settings WHERE id = 1")
-        if cursor.fetchone()[0] == 0:
-            cursor.execute(
-                "INSERT INTO tenant_settings (id, name, domains, primary_color, logo_url, "
-                "sso_client_id, sso_tenant_id, sso_client_secret, email_configs) "
-                "VALUES (1, 'Default Company', '[]', '#7a1220', '', '', '', '', '[]')"
-            )
-
-        # Seed the default global template library, visible to every account,
-        # so a fresh tenant/database always has a realistic set to choose
-        # from out of the box. Each is checked by name so re-running this on
-        # an existing database only inserts the ones that are still missing.
-        base_url = config.PHISHING_BASE_URL.rstrip("/")
-        banner_url = f"{base_url}/static/uploads/16372ba6a4954ea1a7aaa08b674f31bb.svg"
-        for tmpl in build_default_templates(banner_url):
-            cursor.execute("SELECT COUNT(*) FROM templates WHERE name = ?", (tmpl["name"],))
+            for idx in index_statements:
+                cursor.execute(idx)
+            # Seed the single settings row if absent.
+            cursor.execute("SELECT COUNT(*) FROM tenant_settings WHERE id = 1")
             if cursor.fetchone()[0] == 0:
                 cursor.execute(
-                    "INSERT INTO templates (id, name, category, theme, subject, body, description, "
-                    "thumbnail, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        str(uuid.uuid4()),
-                        tmpl["name"],
-                        tmpl["category"],
-                        tmpl.get("theme", ""),
-                        tmpl["subject"],
-                        tmpl["body"],
-                        tmpl["description"],
-                        tmpl["thumbnail"],
-                        1,
-                        _utcnow_iso(),
-                    ),
-                )
-            elif tmpl.get("theme"):
-                # Backfill theme on pre-existing global templates seeded before
-                # the theme column existed, without touching any tenant's own
-                # custom (non-global) templates that happen to share a name.
-                cursor.execute(
-                    "UPDATE templates SET theme = ? WHERE name = ? AND is_global = 1 AND (theme IS NULL OR theme = '')",
-                    (tmpl["theme"], tmpl["name"]),
+                    "INSERT INTO tenant_settings (id, name, domains, primary_color, logo_url, "
+                    "sso_client_id, sso_tenant_id, sso_client_secret, email_configs) "
+                    "VALUES (1, 'Default Company', '[]', '#7a1220', '', '', '', '', '[]')"
                 )
 
-        # Seed a handful of default blog posts so the public blog is never
-        # empty on a fresh install. Checked by title so this stays a no-op
-        # once the posts already exist.
-        for post in _default_blog_posts():
-            cursor.execute("SELECT COUNT(*) FROM blog_posts WHERE title = ?", (post["title"],))
-            if cursor.fetchone()[0] == 0:
-                cursor.execute(
-                    "INSERT INTO blog_posts (id, title, slug, content, author_name, author_company, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        str(uuid.uuid4()),
-                        post["title"],
-                        _slugify(post["title"]),
-                        post["content"],
-                        post["author_name"],
-                        post["author_company"],
-                        _utcnow_iso(),
-                        _utcnow_iso(),
-                    ),
-                )
+            # Seed the default global template library, visible to every account,
+            # so a fresh tenant/database always has a realistic set to choose
+            # from out of the box. Each is checked by name so re-running this on
+            # an existing database only inserts the ones that are still missing.
+            base_url = config.PHISHING_BASE_URL.rstrip("/")
+            banner_url = f"{base_url}/static/uploads/16372ba6a4954ea1a7aaa08b674f31bb.svg"
+            for tmpl in build_default_templates(banner_url):
+                cursor.execute("SELECT COUNT(*) FROM templates WHERE name = ?", (tmpl["name"],))
+                if cursor.fetchone()[0] == 0:
+                    cursor.execute(
+                        "INSERT INTO templates (id, name, category, theme, subject, body, description, "
+                        "thumbnail, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            str(uuid.uuid4()),
+                            tmpl["name"],
+                            tmpl["category"],
+                            tmpl.get("theme", ""),
+                            tmpl["subject"],
+                            tmpl["body"],
+                            tmpl["description"],
+                            tmpl["thumbnail"],
+                            1,
+                            _utcnow_iso(),
+                        ),
+                    )
+                elif tmpl.get("theme"):
+                    # Backfill theme on pre-existing global templates seeded before
+                    # the theme column existed, without touching any tenant's own
+                    # custom (non-global) templates that happen to share a name.
+                    cursor.execute(
+                        "UPDATE templates SET theme = ? WHERE name = ? AND is_global = 1 AND (theme IS NULL OR theme = '')",
+                        (tmpl["theme"], tmpl["name"]),
+                    )
 
-        conn.commit()
-        conn.close()
+            # Seed a handful of default blog posts so the public blog is never
+            # empty on a fresh install. Checked by title so this stays a no-op
+            # once the posts already exist.
+            for post in _default_blog_posts():
+                cursor.execute("SELECT COUNT(*) FROM blog_posts WHERE title = ?", (post["title"],))
+                if cursor.fetchone()[0] == 0:
+                    cursor.execute(
+                        "INSERT INTO blog_posts (id, title, slug, content, author_name, author_company, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            str(uuid.uuid4()),
+                            post["title"],
+                            _slugify(post["title"]),
+                            post["content"],
+                            post["author_name"],
+                            post["author_company"],
+                            _utcnow_iso(),
+                            _utcnow_iso(),
+                        ),
+                    )
+
+            conn.commit()
+        finally:
+            # Always return the connection to the pool, even on failure -
+            # otherwise a mid-transaction exception here (e.g. the race this
+            # advisory lock now prevents) leaks a checked-out connection on
+            # every retry until the pool is exhausted and unrelated queries
+            # elsewhere in the app start failing too.
+            conn.close()
     logging.info("Tenant service SQLite schema initialised.")
 
 

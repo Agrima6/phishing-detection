@@ -237,25 +237,41 @@ def _init_db():
 
     with _db_lock:
         conn = _get_conn()
-        cursor = conn.cursor()
-        for ddl in ddl_statements:
-            cursor.execute(ddl)
-        existing_cols = _table_columns(cursor, "recipients")
-        for col in device_columns:
-            if col not in existing_cols:
-                cursor.execute(f"ALTER TABLE recipients ADD COLUMN {col} TEXT")
-        existing_campaign_cols = _table_columns(cursor, "campaigns")
-        if "email_config_id" not in existing_campaign_cols:
-            cursor.execute("ALTER TABLE campaigns ADD COLUMN email_config_id TEXT")
-        if "scheduled_at" not in existing_campaign_cols:
-            cursor.execute("ALTER TABLE campaigns ADD COLUMN scheduled_at TEXT")
-        if "tenant_id" not in existing_campaign_cols:
-            cursor.execute("ALTER TABLE campaigns ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
-            cursor.execute("CREATE INDEX IF NOT EXISTS IX_campaigns_tenant_id ON campaigns (tenant_id)")
-        for idx in index_statements:
-            cursor.execute(idx)
-        conn.commit()
-        conn.close()
+        try:
+            cursor = conn.cursor()
+            if _using_postgres():
+                # Every gunicorn worker process has its own in-memory
+                # _db_initialized flag, so all of them race to run this DDL
+                # on the first request after a restart. Without this lock,
+                # concurrent CREATE TABLE IF NOT EXISTS statements can raise
+                # a duplicate key error on Postgres's pg_type catalog, since
+                # the existence check and the catalog insert aren't atomic
+                # across sessions. This transaction-scoped lock serializes
+                # them and releases itself automatically on commit/rollback.
+                cursor.execute("SELECT pg_advisory_xact_lock(727311)")
+            for ddl in ddl_statements:
+                cursor.execute(ddl)
+            existing_cols = _table_columns(cursor, "recipients")
+            for col in device_columns:
+                if col not in existing_cols:
+                    cursor.execute(f"ALTER TABLE recipients ADD COLUMN {col} TEXT")
+            existing_campaign_cols = _table_columns(cursor, "campaigns")
+            if "email_config_id" not in existing_campaign_cols:
+                cursor.execute("ALTER TABLE campaigns ADD COLUMN email_config_id TEXT")
+            if "scheduled_at" not in existing_campaign_cols:
+                cursor.execute("ALTER TABLE campaigns ADD COLUMN scheduled_at TEXT")
+            if "tenant_id" not in existing_campaign_cols:
+                cursor.execute("ALTER TABLE campaigns ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+                cursor.execute("CREATE INDEX IF NOT EXISTS IX_campaigns_tenant_id ON campaigns (tenant_id)")
+            for idx in index_statements:
+                cursor.execute(idx)
+            conn.commit()
+        finally:
+            # Always return the connection to the pool, even on failure -
+            # otherwise a mid-transaction exception here leaks a checked-out
+            # connection on every retry until the pool is exhausted and
+            # unrelated queries elsewhere in the app start failing too.
+            conn.close()
     logging.info(f"SQLite schema initialised at {_DB_PATH}.")
 
 
