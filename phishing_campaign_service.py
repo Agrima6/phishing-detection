@@ -21,6 +21,7 @@ from pathlib import Path
 try:
     import psycopg2
     import psycopg2.errors
+    import psycopg2.pool
 except ImportError:
     psycopg2 = None
 
@@ -65,12 +66,40 @@ class _PGCursorProxy:
         return getattr(self._cursor, name)
 
 
+_pg_pool = None
+_pg_pool_lock = threading.Lock()
+
+
+def _get_pg_pool():
+    """Lazily-created, process-wide Postgres connection pool. Each gunicorn
+    worker gets its own pool; connections are kept open and reused instead of
+    paying a fresh TCP+TLS handshake to the (geographically distant) Neon
+    host on every single query, which was previously dominating request
+    latency in production."""
+    global _pg_pool
+    if _pg_pool is None:
+        with _pg_pool_lock:
+            if _pg_pool is None:
+                _pg_pool = psycopg2.pool.ThreadedConnectionPool(1, 10, _DATABASE_URL)
+    return _pg_pool
+
+
 class _PGConnProxy:
-    def __init__(self, conn):
+    def __init__(self, conn, pool):
         self._conn = conn
+        self._pool = pool
+        self._returned = False
 
     def cursor(self):
         return _PGCursorProxy(self._conn.cursor())
+
+    def close(self):
+        # Existing call sites all call conn.close() when done - return the
+        # underlying connection to the pool instead of actually closing the
+        # socket, so the next _get_conn() call can reuse it.
+        if not self._returned:
+            self._returned = True
+            self._pool.putconn(self._conn)
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
@@ -82,8 +111,9 @@ def _get_conn():
     if _using_postgres():
         if psycopg2 is None:
             raise RuntimeError("DATABASE_URL is set but psycopg2 is not installed.")
-        raw = psycopg2.connect(_DATABASE_URL)
-        return _PGConnProxy(raw)
+        pool = _get_pg_pool()
+        raw = pool.getconn()
+        return _PGConnProxy(raw, pool)
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(_DB_PATH), timeout=30, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON")
