@@ -334,16 +334,19 @@ class PhishingCampaignService:
                               sent_delta: int = 0, opened_delta: int = 0,
                               clicked_delta: int = 0, failed_delta: int = 0,
                               duplicate_delta: int = 0):
+        # SQLite's MAX() doubles as a scalar 2-arg function; Postgres's MAX is
+        # aggregate-only and needs GREATEST() for this same floor-at-zero use.
+        floor_fn = "GREATEST" if _using_postgres() else "MAX"
         with _db_lock:
             conn = _get_conn()
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(f"""
                 UPDATE campaigns
-                SET total_sent       = MAX(0, total_sent       + ?),
-                    total_opened     = MAX(0, total_opened     + ?),
-                    total_clicked    = MAX(0, total_clicked    + ?),
-                    total_failed     = MAX(0, total_failed     + ?),
-                    total_duplicates = MAX(0, total_duplicates + ?),
+                SET total_sent       = {floor_fn}(0, total_sent       + ?),
+                    total_opened     = {floor_fn}(0, total_opened     + ?),
+                    total_clicked    = {floor_fn}(0, total_clicked    + ?),
+                    total_failed     = {floor_fn}(0, total_failed     + ?),
+                    total_duplicates = {floor_fn}(0, total_duplicates + ?),
                     updated_at       = ?,
                     status = CASE
                         WHEN status = 'draft' AND ? > 0 THEN 'active'
