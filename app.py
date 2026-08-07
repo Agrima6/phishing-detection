@@ -14,6 +14,7 @@ from html import escape
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Load .env file for local development (no-op if file absent or python-dotenv not installed)
 try:
@@ -45,7 +46,10 @@ from gemini_service import (
 
 from config import config
 from phishing_campaign_service import PhishingCampaignService
-from tenant_service import TenantService, save_chatbot_lead, list_chatbot_leads
+from tenant_service import (
+    TenantService, save_chatbot_lead, list_chatbot_leads,
+    list_blog_posts, get_blog_post, create_blog_post, update_blog_post, delete_blog_post,
+)
 from auth_clerk import auth_clerk_bp, is_clerk_configured
 
 # ---------------------------------------------------------------------------
@@ -1581,6 +1585,113 @@ def short_redirect(token):
 
 
 # ---------------------------------------------------------------------------
+# Built-in phishing landing page - brand skins
+#
+# The fake login page's look is picked at request time to match whichever
+# real destination the campaign's template pointed to (redirect_url), so a
+# OneDrive-themed email doesn't land on a page that says "Sign in to Zoom".
+# ---------------------------------------------------------------------------
+
+_PHISH_BRANDS = {
+    "microsoft": {
+        "title": "Sign in to Microsoft 365",
+        "bg": "#f3f2f1",
+        "radius": "0",
+        "btn_radius": "0",
+        "accent": "#0078d4",
+        "accent_hover": "#006cbe",
+        "heading": "Sign in",
+        "subtitle": "Use your Microsoft account",
+        "brand_name": "Microsoft 365",
+        "real_url": "login.microsoftonline.com",
+        "support_url": "https://support.microsoft.com/",
+        "fallback_url": "https://login.microsoftonline.com",
+        "logo_svg": (
+            '<svg width="52" height="52" viewBox="0 0 23 23" xmlns="http://www.w3.org/2000/svg">'
+            '<rect x="1" y="1" width="10" height="10" fill="#f25022"/>'
+            '<rect x="12" y="1" width="10" height="10" fill="#7fba00"/>'
+            '<rect x="1" y="12" width="10" height="10" fill="#00a4ef"/>'
+            '<rect x="12" y="12" width="10" height="10" fill="#ffb900"/>'
+            '</svg>'
+        ),
+    },
+    "google": {
+        "title": "Sign in - Google Accounts",
+        "bg": "#ffffff",
+        "radius": "8px",
+        "btn_radius": "20px",
+        "accent": "#1a73e8",
+        "accent_hover": "#1765cc",
+        "heading": "Sign in",
+        "subtitle": "Use your Google Account",
+        "brand_name": "Google",
+        "real_url": "accounts.google.com",
+        "support_url": "https://accounts.google.com/signup",
+        "fallback_url": "https://accounts.google.com",
+        "logo_svg": (
+            '<svg width="40" height="40" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">'
+            '<path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.9 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l5.7-5.7C34.6 6 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.7-.4-3.5z"/>'
+            '<path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.9 18.9 13 24 13c3.1 0 5.8 1.1 8 3l5.7-5.7C34.6 6 29.6 4 24 4c-7.7 0-14.4 4.4-17.7 10.7z"/>'
+            '<path fill="#4CAF50" d="M24 44c5.2 0 10-2 13.6-5.2l-6.3-5.3C29.3 35.1 26.8 36 24 36c-5.3 0-9.6-3.1-11.3-7.6l-6.5 5C9.5 39.6 16.2 44 24 44z"/>'
+            '<path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-1 2.8-2.8 5.1-5.1 6.6l6.3 5.3C39.9 37.1 44 31.5 44 24c0-1.3-.1-2.7-.4-3.5z"/>'
+            '</svg>'
+        ),
+    },
+    "zoom": {
+        "title": "Zoom - Sign In",
+        "bg": "#f4f6f8",
+        "radius": "12px",
+        "btn_radius": "6px",
+        "accent": "#2d8cff",
+        "accent_hover": "#2681f2",
+        "heading": "Sign in",
+        "subtitle": "Sign in to join or start a meeting",
+        "brand_name": "Zoom",
+        "real_url": "zoom.us",
+        "support_url": "https://zoom.us/signup",
+        "fallback_url": "https://zoom.us",
+        "logo_svg": (
+            '<svg width="40" height="40" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">'
+            '<rect width="32" height="32" rx="8" fill="#2D8CFF"/>'
+            '<path fill="#fff" d="M8 12.5c0-.83.67-1.5 1.5-1.5h8c.83 0 1.5.67 1.5 1.5v3.6l3.3-2.4c.4-.3 1-.02 1 .48v6.6c0 .5-.6.78-1 .48l-3.3-2.4v1.6c0 .83-.67 1.5-1.5 1.5h-8c-.83 0-1.5-.67-1.5-1.5v-7.9z"/>'
+            '</svg>'
+        ),
+    },
+    "workday": {
+        "title": "Sign In - Workday",
+        "bg": "#ffffff",
+        "radius": "4px",
+        "btn_radius": "4px",
+        "accent": "#0875e1",
+        "accent_hover": "#0662bd",
+        "heading": "Sign in with your organization account",
+        "subtitle": "Enter your work email to continue",
+        "brand_name": "Workday",
+        "real_url": "workday.com",
+        "support_url": "https://www.workday.com/",
+        "fallback_url": "https://www.workday.com",
+        "logo_svg": (
+            '<svg width="130" height="34" viewBox="0 0 130 34" xmlns="http://www.w3.org/2000/svg">'
+            '<circle cx="17" cy="17" r="15" fill="none" stroke="#F89C0E" stroke-width="3"/>'
+            '<text x="40" y="24" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#0875e1">workday.</text>'
+            '</svg>'
+        ),
+    },
+}
+
+
+def _brand_for_url(url: str) -> dict:
+    host = (urlparse(url).hostname or "").lower()
+    if "google" in host:
+        return _PHISH_BRANDS["google"]
+    if "zoom.us" in host:
+        return _PHISH_BRANDS["zoom"]
+    if "workday" in host:
+        return _PHISH_BRANDS["workday"]
+    return _PHISH_BRANDS["microsoft"]
+
+
+# ---------------------------------------------------------------------------
 # Built-in phishing landing page
 # ---------------------------------------------------------------------------
 
@@ -1635,9 +1746,23 @@ def phishing_landing(token):
     html_path = Path(__file__).parent / "landing_page" / "index.html"
     if not html_path.exists():
         return Response(status=302, headers={"Location": redirect_to, "Cache-Control": "no-store, no-cache"})
+    brand = _brand_for_url(redirect_to)
     html = html_path.read_text(encoding="utf-8")
     html = html.replace("'__REDIRECT_URL__'", f"'{_js_escape(redirect_to)}'")
     html = html.replace("'__ORG_NAME__'", f"'{config.ORG_NAME}'")
+    html = html.replace("'__BRAND_FALLBACK_URL__'", f"'{_js_escape(brand['fallback_url'])}'")
+    html = html.replace("__BRAND_TITLE__", escape(brand["title"]))
+    html = html.replace("__BRAND_BG__", brand["bg"])
+    html = html.replace("__BRAND_RADIUS__", brand["radius"])
+    html = html.replace("__BRAND_BTN_RADIUS__", brand["btn_radius"])
+    html = html.replace("__BRAND_ACCENT_HOVER__", brand["accent_hover"])
+    html = html.replace("__BRAND_ACCENT__", brand["accent"])
+    html = html.replace("__BRAND_HEADING__", escape(brand["heading"]))
+    html = html.replace("__BRAND_SUBTITLE__", escape(brand["subtitle"]))
+    html = html.replace("__BRAND_NAME__", escape(brand["brand_name"]))
+    html = html.replace("__BRAND_REAL_URL__", escape(brand["real_url"]))
+    html = html.replace("__BRAND_SUPPORT_URL__", brand["support_url"])
+    html = html.replace("__BRAND_LOGO_SVG__", brand["logo_svg"])
     # Inject the tracking token so the page's JS can call /api/track/ping/<token>
     # only after observing a real user-interaction event.
     safe_token = token if valid_token else ""
@@ -1874,6 +1999,59 @@ def admin_chatbot_leads():
     return _json_response(list_chatbot_leads())
 
 
+# ---------------------------------------------------------------------------
+# Blog - fully public reads and submissions; edit/delete gated to Super Admin
+# ---------------------------------------------------------------------------
+
+@app.route("/api/blog", methods=["GET", "POST", "OPTIONS"])
+def blog_posts():
+    if request.method == "OPTIONS":
+        return "", 200
+
+    if request.method == "GET":
+        return _json_response(list_blog_posts())
+
+    body = request.get_json(force=True, silent=True) or {}
+    title = (body.get("title") or "").strip()
+    content = (body.get("content") or "").strip()
+    author_name = (body.get("author_name") or "").strip()
+    author_company = (body.get("author_company") or "").strip()
+    if not title or not content or not author_name:
+        return _json_response({"error": "title, content, and author_name are required"}, 400)
+
+    post = create_blog_post(title, content, author_name, author_company)
+    return _json_response(post, 201)
+
+
+@app.route("/api/blog/<post_id>", methods=["GET", "PUT", "DELETE", "OPTIONS"])
+def blog_post_detail(post_id):
+    if request.method == "OPTIONS":
+        return "", 200
+
+    if request.method == "GET":
+        post = get_blog_post(post_id)
+        if not post:
+            return _json_response({"error": "Post not found"}, 404)
+        return _json_response(post)
+
+    role = _get_role()
+    if not _can(role, "manage_tenants"):
+        return _unauthorized() if not role else _forbidden("manage_tenants")
+
+    if request.method == "DELETE":
+        if not delete_blog_post(post_id):
+            return _json_response({"error": "Post not found"}, 404)
+        return _json_response({"status": "deleted"})
+
+    body = request.get_json(force=True, silent=True) or {}
+    title = (body.get("title") or "").strip()
+    content = (body.get("content") or "").strip()
+    if not title or not content:
+        return _json_response({"error": "title and content are required"}, 400)
+    updated = update_blog_post(post_id, title, content)
+    if not updated:
+        return _json_response({"error": "Post not found"}, 404)
+    return _json_response(updated)
 
 
 # ---------------------------------------------------------------------------

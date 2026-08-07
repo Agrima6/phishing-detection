@@ -103,6 +103,18 @@ def _init_db():
             created_at TEXT NOT NULL
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS blog_posts (
+            id             TEXT NOT NULL PRIMARY KEY,
+            title          TEXT NOT NULL,
+            slug           TEXT NOT NULL UNIQUE,
+            content        TEXT NOT NULL,
+            author_name    TEXT NOT NULL DEFAULT '',
+            author_company TEXT NOT NULL DEFAULT '',
+            created_at     TEXT NOT NULL,
+            updated_at     TEXT NOT NULL
+        )
+        """,
     ]
     index_statements = [
         "CREATE INDEX IF NOT EXISTS IX_employees_email ON employees (email)",
@@ -180,9 +192,97 @@ def _init_db():
                     (tmpl["theme"], tmpl["name"]),
                 )
 
+        # Seed a handful of default blog posts so the public blog is never
+        # empty on a fresh install. Checked by title so this stays a no-op
+        # once the posts already exist.
+        for post in _default_blog_posts():
+            cursor.execute("SELECT COUNT(*) FROM blog_posts WHERE title = ?", (post["title"],))
+            if cursor.fetchone()[0] == 0:
+                cursor.execute(
+                    "INSERT INTO blog_posts (id, title, slug, content, author_name, author_company, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(uuid.uuid4()),
+                        post["title"],
+                        _slugify(post["title"]),
+                        post["content"],
+                        post["author_name"],
+                        post["author_company"],
+                        _utcnow_iso(),
+                        _utcnow_iso(),
+                    ),
+                )
+
         conn.commit()
         conn.close()
     logging.info("Tenant service SQLite schema initialised.")
+
+
+def _default_blog_posts() -> list[dict]:
+    return [
+        {
+            "title": "Why phishing training beats another slide deck",
+            "author_name": "Workmate Shield Team",
+            "author_company": "Workmate Shield",
+            "content": (
+                "Most security awareness programs still lean on an annual slide deck and a quiz nobody "
+                "remembers past Friday. It checks a compliance box, but it does not change what happens "
+                "the next time someone gets a convincing email asking them to reset a password.\n\n"
+                "Simulated phishing works differently because it tests behavior, not memory. When an "
+                "employee clicks a fake invoice link, they learn the lesson in the moment it actually "
+                "matters, and that lesson tends to stick far longer than a slide they skimmed months ago.\n\n"
+                "The teams that get the most out of this approach do not treat a click as a failure to "
+                "punish. They treat it as a data point. Which departments click more often? Which lures "
+                "work and which do not? Run enough rounds and you start to see real, measurable improvement "
+                "instead of a one time compliance certificate.\n\n"
+                "Start small. One campaign a month, aimed at a mix of departments, is enough to build a "
+                "habit of caution without turning security into something employees resent."
+            ),
+        },
+        {
+            "title": "Five email red flags anyone can spot",
+            "author_name": "Workmate Shield Team",
+            "author_company": "Workmate Shield",
+            "content": (
+                "You do not need a security background to catch most phishing emails. A few habits go a "
+                "long way, and they take seconds to check.\n\n"
+                "First, look at the actual sender address, not just the display name. \"IT Support\" can sit "
+                "in front of almost any email address, and attackers count on people not checking.\n\n"
+                "Second, be suspicious of urgency. \"Your account will be locked in one hour\" is a pressure "
+                "tactic designed to stop you from thinking clearly. Real IT departments rarely give you a "
+                "sixty minute deadline.\n\n"
+                "Third, hover over links before clicking. The visible text can say anything; the actual "
+                "destination is what matters, and it is usually visible in the bottom corner of your browser "
+                "or email client.\n\n"
+                "Fourth, watch for mismatched branding. A logo that looks slightly off, an odd font, or "
+                "generic \"Dear User\" instead of your name are all small signals worth noticing.\n\n"
+                "Fifth, when in doubt, verify through a separate channel. Call the person or company "
+                "directly using a number you already know, not one from the email itself. That one habit "
+                "alone stops a huge share of real world attacks."
+            ),
+        },
+        {
+            "title": "What running hundreds of simulated campaigns taught us",
+            "author_name": "Workmate Shield Team",
+            "author_company": "Workmate Shield",
+            "content": (
+                "After running phishing simulations across many different teams, a few patterns show up "
+                "again and again, and they are worth sharing.\n\n"
+                "Click rates drop fastest right after the first campaign, then plateau. The biggest jump in "
+                "awareness usually comes from that very first \"oh no, I clicked it\" moment. After that, "
+                "gains come more slowly and need repetition to hold.\n\n"
+                "Finance and HR related lures consistently perform better than generic IT ones. An email "
+                "about an invoice, a payroll update, or a benefits enrollment deadline gets more clicks than "
+                "a password reset notice, probably because it feels more personally relevant.\n\n"
+                "New hires are not always the weakest link. In several rounds, longer tenured employees "
+                "clicked just as often, likely because familiarity breeds a bit of complacency with routine "
+                "looking emails.\n\n"
+                "None of this means training does not work. It means it needs to be ongoing rather than a "
+                "once a year event, and it needs real data behind it instead of guesswork about who is most "
+                "at risk."
+            ),
+        },
+    ]
 
 
 def _ensure_db_ready():
@@ -228,6 +328,108 @@ def list_chatbot_leads() -> list[dict]:
     rows = _fetchall_dict(cursor)
     conn.close()
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Blog - public. Anyone can read every post, and anyone can submit one from
+# the public site; a Super Admin can edit or delete anything.
+# ---------------------------------------------------------------------------
+
+def _slugify(title: str) -> str:
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return slug or str(uuid.uuid4())[:8]
+
+
+def _unique_slug(cursor, title: str, exclude_id: str | None = None) -> str:
+    base = _slugify(title)
+    slug = base
+    n = 2
+    while True:
+        if exclude_id:
+            cursor.execute("SELECT id FROM blog_posts WHERE slug = ? AND id != ?", (slug, exclude_id))
+        else:
+            cursor.execute("SELECT id FROM blog_posts WHERE slug = ?", (slug,))
+        if not cursor.fetchone():
+            return slug
+        slug = f"{base}-{n}"
+        n += 1
+
+
+def list_blog_posts() -> list[dict]:
+    _ensure_db_ready()
+    conn = _get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM blog_posts ORDER BY created_at DESC")
+    rows = _fetchall_dict(cursor)
+    conn.close()
+    return rows
+
+
+def get_blog_post(id_or_slug: str) -> dict | None:
+    _ensure_db_ready()
+    conn = _get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM blog_posts WHERE id = ? OR slug = ?", (id_or_slug, id_or_slug))
+    row = _fetchone_dict(cursor)
+    conn.close()
+    return row
+
+
+def create_blog_post(title: str, content: str, author_name: str, author_company: str = "") -> dict:
+    _ensure_db_ready()
+    now = _utcnow_iso()
+    with _db_lock:
+        conn = _get_conn()
+        cursor = conn.cursor()
+        slug = _unique_slug(cursor, title)
+        row = {
+            "id": str(uuid.uuid4()), "title": title, "slug": slug, "content": content,
+            "author_name": author_name, "author_company": author_company,
+            "created_at": now, "updated_at": now,
+        }
+        cursor.execute(
+            "INSERT INTO blog_posts (id, title, slug, content, author_name, author_company, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (row["id"], row["title"], row["slug"], row["content"], row["author_name"],
+             row["author_company"], row["created_at"], row["updated_at"]),
+        )
+        conn.commit()
+        conn.close()
+    return row
+
+
+def update_blog_post(post_id: str, title: str, content: str) -> dict | None:
+    _ensure_db_ready()
+    with _db_lock:
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM blog_posts WHERE id = ?", (post_id,))
+        existing = _fetchone_dict(cursor)
+        if not existing:
+            conn.close()
+            return None
+        slug = _unique_slug(cursor, title, exclude_id=post_id) if title != existing["title"] else existing["slug"]
+        now = _utcnow_iso()
+        cursor.execute(
+            "UPDATE blog_posts SET title = ?, slug = ?, content = ?, updated_at = ? WHERE id = ?",
+            (title, slug, content, now, post_id),
+        )
+        conn.commit()
+        conn.close()
+    return get_blog_post(post_id)
+
+
+def delete_blog_post(post_id: str) -> bool:
+    _ensure_db_ready()
+    with _db_lock:
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM blog_posts WHERE id = ?", (post_id,))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+    return deleted
 
 
 class TenantService:
