@@ -10,6 +10,7 @@ import re
 import threading
 import time
 import uuid
+from html import escape
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -44,7 +45,7 @@ from gemini_service import (
 
 from config import config
 from phishing_campaign_service import PhishingCampaignService
-from tenant_service import TenantService
+from tenant_service import TenantService, save_chatbot_lead, list_chatbot_leads
 from auth_clerk import auth_clerk_bp, is_clerk_configured
 
 # ---------------------------------------------------------------------------
@@ -1816,6 +1817,61 @@ def ai_generate():
 @app.route("/api/health", methods=["GET"])
 def health_check():
     return _json_response({"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()})
+
+
+# ---------------------------------------------------------------------------
+# Chatbot lead capture - public (no auth), used by the "Shieldy" widget
+# whenever a visitor asks a question the built-in help topics can't answer.
+# ---------------------------------------------------------------------------
+
+_CHATBOT_NOTIFY_RECIPIENTS = "info@wcspl.net, support@wcspl.net"
+
+
+@app.route("/api/chatbot/inquiry", methods=["POST", "OPTIONS"])
+def chatbot_inquiry():
+    if request.method == "OPTIONS":
+        return "", 200
+    body = request.get_json(force=True, silent=True) or {}
+    name = (body.get("name") or "").strip()
+    phone = (body.get("phone") or "").strip()
+    email = (body.get("email") or "").strip()
+    message = (body.get("message") or "").strip()
+    if not name or not message:
+        return _json_response({"error": "name and message are required"}, 400)
+
+    try:
+        save_chatbot_lead(name=name, phone=phone, email=email, message=message)
+    except Exception as exc:
+        logging.error(f"Failed to save chatbot lead: {exc}", exc_info=True)
+
+    try:
+        cfg = _resolve_email_config(None)
+        body_html = (
+            "<p><strong>New Shieldy chatbot inquiry</strong></p>"
+            f"<p>Name: {escape(name)}<br>"
+            f"Phone: {escape(phone) or '(not provided)'}<br>"
+            f"Email: {escape(email) or '(not provided)'}</p>"
+            f"<p><strong>Message:</strong><br>{escape(message)}</p>"
+        )
+        _send_email(
+            _CHATBOT_NOTIFY_RECIPIENTS,
+            f"Shieldy inquiry from {name}",
+            body_html,
+            "Workmate Shield Chatbot",
+            cfg,
+        )
+    except Exception as exc:
+        logging.error(f"Failed to email chatbot inquiry: {exc}", exc_info=True)
+
+    return _json_response({"status": "received"})
+
+
+@app.route("/api/admin/chatbot-leads", methods=["GET"])
+def admin_chatbot_leads():
+    role = _get_role()
+    if not _can(role, "manage_tenants"):
+        return _unauthorized() if not role else _forbidden("manage_tenants")
+    return _json_response(list_chatbot_leads())
 
 
 

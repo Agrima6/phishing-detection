@@ -93,6 +93,16 @@ def _init_db():
             created_at     TEXT    NOT NULL
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS chatbot_leads (
+            id         TEXT NOT NULL PRIMARY KEY,
+            name       TEXT NOT NULL,
+            phone      TEXT NOT NULL DEFAULT '',
+            email      TEXT NOT NULL DEFAULT '',
+            message    TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
     ]
     index_statements = [
         "CREATE INDEX IF NOT EXISTS IX_employees_email ON employees (email)",
@@ -184,6 +194,40 @@ def _ensure_db_ready():
             return
         _init_db()
         _db_initialized = True
+
+
+# ---------------------------------------------------------------------------
+# Chatbot leads - not tenant-scoped, since these come from the "Shieldy"
+# widget before a visitor is necessarily associated with any company.
+# ---------------------------------------------------------------------------
+
+def save_chatbot_lead(name: str, phone: str, email: str, message: str) -> dict:
+    _ensure_db_ready()
+    row = {
+        "id": str(uuid.uuid4()), "name": name, "phone": phone,
+        "email": email, "message": message, "created_at": _utcnow_iso(),
+    }
+    with _db_lock:
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO chatbot_leads (id, name, phone, email, message, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (row["id"], row["name"], row["phone"], row["email"], row["message"], row["created_at"]),
+        )
+        conn.commit()
+        conn.close()
+    return row
+
+
+def list_chatbot_leads() -> list[dict]:
+    _ensure_db_ready()
+    conn = _get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM chatbot_leads ORDER BY created_at DESC LIMIT 500")
+    rows = _fetchall_dict(cursor)
+    conn.close()
+    return rows
 
 
 class TenantService:
