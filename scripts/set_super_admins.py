@@ -33,13 +33,22 @@ for email in TARGETS:
     users = r.json()
     if users:
         uid = users[0]["id"]
-        resp = requests.patch(
+        # Password and metadata are separate endpoints on Clerk's current API -
+        # the old combined PATCH /v1/users/{id} with public_metadata is deprecated.
+        pw_resp = requests.patch(
             f"{BASE}/users/{uid}",
             headers=HEADERS,
-            json={"password": PASSWORD, "public_metadata": {"role": "super_admin"}},
+            json={"password": PASSWORD, "skip_password_checks": True},
             timeout=15,
         )
-        print(email, "-> updated existing user:", resp.status_code, resp.text[:200])
+        meta_resp = requests.patch(
+            f"{BASE}/users/{uid}/metadata",
+            headers=HEADERS,
+            json={"public_metadata": {"role": "super_admin"}},
+            timeout=15,
+        )
+        print(email, "-> updated existing user. password:", pw_resp.status_code, pw_resp.text[:150])
+        print(email, "-> role:", meta_resp.status_code, meta_resp.text[:150])
     else:
         resp = requests.post(
             f"{BASE}/users",
@@ -48,7 +57,7 @@ for email in TARGETS:
                 "email_address": [email],
                 "password": PASSWORD,
                 "public_metadata": {"role": "super_admin"},
-                "skip_password_checks": False,
+                "skip_password_checks": True,
             },
             timeout=15,
         )
