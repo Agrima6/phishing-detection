@@ -33,12 +33,33 @@ BASE = "https://api.clerk.com/v1"
 TARGETS = ["yaduvanshi.v@gmail.com", "info@wcspl.net", "support@wcspl.net"]
 PASSWORD = sys.argv[1]
 
+
+def verify_email(user_obj: dict, target_email: str):
+    """Mark the user's email address verified. Without this, an account
+    created directly via the Backend API has an unverified email, and Clerk
+    refuses to complete a plain password sign-in for it (surfaces to the
+    user as a vague "additional verification required" error)."""
+    for addr in user_obj.get("email_addresses", []):
+        if addr.get("email_address", "").lower() == target_email.lower():
+            if addr.get("verification", {}).get("status") == "verified":
+                return "already verified"
+            resp = requests.patch(
+                f"{BASE}/email_addresses/{addr['id']}",
+                headers=HEADERS,
+                json={"verified": True},
+                timeout=15,
+            )
+            return f"{resp.status_code} {resp.text[:150]}"
+    return "email address not found on user object"
+
+
 for email in TARGETS:
     r = requests.get(f"{BASE}/users", headers=HEADERS, params={"email_address": [email]}, timeout=15)
     r.raise_for_status()
     users = r.json()
     if users:
-        uid = users[0]["id"]
+        user_obj = users[0]
+        uid = user_obj["id"]
         # Password and metadata are separate endpoints on Clerk's current API -
         # the old combined PATCH /v1/users/{id} with public_metadata is deprecated.
         pw_resp = requests.patch(
@@ -53,8 +74,10 @@ for email in TARGETS:
             json={"public_metadata": {"role": "super_admin"}},
             timeout=15,
         )
+        verify_result = verify_email(user_obj, email)
         print(email, "-> updated existing user. password:", pw_resp.status_code, pw_resp.text[:150])
         print(email, "-> role:", meta_resp.status_code, meta_resp.text[:150])
+        print(email, "-> email verification:", verify_result)
     else:
         resp = requests.post(
             f"{BASE}/users",
@@ -68,3 +91,6 @@ for email in TARGETS:
             timeout=15,
         )
         print(email, "-> created new user:", resp.status_code, resp.text[:300])
+        if resp.status_code < 300:
+            verify_result = verify_email(resp.json(), email)
+            print(email, "-> email verification:", verify_result)
