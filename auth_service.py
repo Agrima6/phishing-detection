@@ -156,6 +156,14 @@ class RegistrationService:
         conn.close()
         return row
 
+    def get_by_tenant_id(self, tenant_id: str) -> dict | None:
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM registrations WHERE tenant_id = ?", (tenant_id,))
+        row = _fetchone_dict(cursor)
+        conn.close()
+        return row
+
     def get(self, registration_id: str) -> dict | None:
         conn = _get_conn()
         cursor = conn.cursor()

@@ -2724,13 +2724,26 @@ def admin_tenants():
     return _json_response(result, 201)
 
 
-@app.route("/api/admin/tenants/<tenant_id>", methods=["PUT", "DELETE", "OPTIONS"])
+@app.route("/api/admin/tenants/<tenant_id>", methods=["GET", "PUT", "DELETE", "OPTIONS"])
 def admin_tenant_detail(tenant_id):
     if request.method == "OPTIONS":
         return "", 200
     role = _get_role()
     if not _can(role, "manage_tenants"):
         return _unauthorized() if not role else _forbidden("manage_tenants")
+
+    if request.method == "GET":
+        svc = TenantService()
+        tenant = svc.get_tenant(tenant_id)
+        if not tenant:
+            return _json_response({"error": "Company not found"}, 404)
+        employees = TenantService(tenant_id=tenant_id).list_employees()
+        registration = RegistrationService().get_by_tenant_id(tenant_id)
+        out = dict(tenant)
+        out["employees"] = employees
+        out["registration"] = registration
+        return _json_response(out)
+
     if tenant_id == "default":
         return _json_response({"error": "The default tenant can't be edited or deleted here"}, 400)
     svc = TenantService()
