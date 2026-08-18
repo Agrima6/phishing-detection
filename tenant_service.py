@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from config import config
 from default_templates import build_default_templates
-from phishing_campaign_service import _get_conn, _fetchone_dict, _fetchall_dict, _table_columns, _using_postgres
+from phishing_campaign_service import _get_conn, _fetchone_dict, _fetchall_dict, _table_columns, _using_postgres, mask_phone
 
 _db_lock = threading.Lock()
 _db_initialized = False
@@ -76,7 +76,8 @@ def _init_db():
             sso_client_id     TEXT    NOT NULL DEFAULT '',
             sso_tenant_id     TEXT    NOT NULL DEFAULT '',
             sso_client_secret TEXT    NOT NULL DEFAULT '',
-            email_configs     TEXT    NOT NULL DEFAULT '[]'
+            email_configs     TEXT    NOT NULL DEFAULT '[]',
+            whatsapp_configs  TEXT    NOT NULL DEFAULT '[]'
         )
         """,
         """
@@ -91,6 +92,41 @@ def _init_db():
             primary_color  TEXT    NOT NULL DEFAULT '#7a1220',
             status         TEXT    NOT NULL DEFAULT 'active',
             created_at     TEXT    NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id                   TEXT    NOT NULL PRIMARY KEY,
+            email                TEXT    NOT NULL UNIQUE,
+            password_hash        TEXT    NOT NULL,
+            display_name         TEXT    NOT NULL DEFAULT '',
+            role                 TEXT    NOT NULL DEFAULT 'admin',
+            tenant_id            TEXT    DEFAULT NULL,
+            must_change_password INTEGER NOT NULL DEFAULT 0,
+            status               TEXT    NOT NULL DEFAULT 'active',
+            created_at           TEXT    NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS registrations (
+            id                  TEXT    NOT NULL PRIMARY KEY,
+            company_name        TEXT    NOT NULL,
+            contact_name        TEXT    NOT NULL DEFAULT '',
+            contact_email       TEXT    NOT NULL,
+            contact_mobile      TEXT    NOT NULL DEFAULT '',
+            designation         TEXT    NOT NULL DEFAULT '',
+            status              TEXT    NOT NULL DEFAULT 'PENDING_ONBOARDING',
+            onboarding_token_hash TEXT  NOT NULL DEFAULT '',
+            address             TEXT    NOT NULL DEFAULT '',
+            gst_number          TEXT    NOT NULL DEFAULT '',
+            employee_count      TEXT    NOT NULL DEFAULT '',
+            logo_url            TEXT    NOT NULL DEFAULT '',
+            primary_color       TEXT    NOT NULL DEFAULT '#7a1220',
+            reject_reason       TEXT    NOT NULL DEFAULT '',
+            tenant_id           TEXT    DEFAULT NULL,
+            created_at          TEXT    NOT NULL,
+            submitted_at        TEXT    DEFAULT NULL,
+            reviewed_at         TEXT    DEFAULT NULL
         )
         """,
         """
@@ -119,6 +155,9 @@ def _init_db():
     index_statements = [
         "CREATE INDEX IF NOT EXISTS IX_employees_email ON employees (email)",
         "CREATE INDEX IF NOT EXISTS IX_audit_logs_timestamp ON audit_logs (timestamp)",
+        "CREATE INDEX IF NOT EXISTS IX_users_email ON users (email)",
+        "CREATE INDEX IF NOT EXISTS IX_registrations_status ON registrations (status)",
+        "CREATE INDEX IF NOT EXISTS IX_registrations_token ON registrations (onboarding_token_hash)",
     ]
 
     with _db_lock:
@@ -145,11 +184,18 @@ def _init_db():
             if "tenant_id" not in employee_cols:
                 cursor.execute("ALTER TABLE employees ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
                 cursor.execute("CREATE INDEX IF NOT EXISTS IX_employees_tenant_id ON employees (tenant_id)")
+            if "phone" not in employee_cols:
+                cursor.execute("ALTER TABLE employees ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
             template_cols = _table_columns(cursor, "templates")
             if "tenant_id" not in template_cols:
                 cursor.execute("ALTER TABLE templates ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
             if "theme" not in template_cols:
                 cursor.execute("ALTER TABLE templates ADD COLUMN theme TEXT NOT NULL DEFAULT ''")
+            if "channel" not in template_cols:
+                cursor.execute("ALTER TABLE templates ADD COLUMN channel TEXT NOT NULL DEFAULT 'email'")
+            settings_cols = _table_columns(cursor, "tenant_settings")
+            if "whatsapp_configs" not in settings_cols:
+                cursor.execute("ALTER TABLE tenant_settings ADD COLUMN whatsapp_configs TEXT NOT NULL DEFAULT '[]'")
             audit_cols = _table_columns(cursor, "audit_logs")
             if "tenant_id" not in audit_cols:
                 cursor.execute("ALTER TABLE audit_logs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
@@ -157,6 +203,8 @@ def _init_db():
             tenants_cols = _table_columns(cursor, "tenants")
             if "contact_name" not in tenants_cols:
                 cursor.execute("ALTER TABLE tenants ADD COLUMN contact_name TEXT NOT NULL DEFAULT ''")
+            if "logo_url" not in tenants_cols:
+                cursor.execute("ALTER TABLE tenants ADD COLUMN logo_url TEXT NOT NULL DEFAULT ''")
 
             for idx in index_statements:
                 cursor.execute(idx)
@@ -165,8 +213,8 @@ def _init_db():
             if cursor.fetchone()[0] == 0:
                 cursor.execute(
                     "INSERT INTO tenant_settings (id, name, domains, primary_color, logo_url, "
-                    "sso_client_id, sso_tenant_id, sso_client_secret, email_configs) "
-                    "VALUES (1, 'Default Company', '[]', '#7a1220', '', '', '', '', '[]')"
+                    "sso_client_id, sso_tenant_id, sso_client_secret, email_configs, whatsapp_configs) "
+                    "VALUES (1, 'Default Company', '[]', '#7a1220', '', '', '', '', '[]', '[]')"
                 )
 
             # Seed the default global template library, visible to every account,
@@ -180,7 +228,7 @@ def _init_db():
                 if cursor.fetchone()[0] == 0:
                     cursor.execute(
                         "INSERT INTO templates (id, name, category, theme, subject, body, description, "
-                        "thumbnail, is_global, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "thumbnail, is_global, created_at, channel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             str(uuid.uuid4()),
                             tmpl["name"],
@@ -192,6 +240,7 @@ def _init_db():
                             tmpl["thumbnail"],
                             1,
                             _utcnow_iso(),
+                            tmpl.get("channel", "email"),
                         ),
                     )
                 elif tmpl.get("theme"):
@@ -487,14 +536,16 @@ class TenantService:
                     row["risk_rating"] = "medium"
                 else:
                     row["risk_rating"] = "low"
+            if row.get("phone"):
+                row["phone"] = mask_phone(row["phone"])
         return rows
 
     def create_employee(self, name: str, email: str, department: str = "",
-                         manager: str = "", risk_rating: str = "low") -> dict:
+                         manager: str = "", risk_rating: str = "low", phone: str = "") -> dict:
         row = {
             "id": str(uuid.uuid4()), "name": name, "email": email,
             "department": department, "manager": manager,
-            "risk_rating": risk_rating, "hits_count": 0,
+            "risk_rating": risk_rating, "hits_count": 0, "phone": phone,
             "total_simulations": 0, "created_at": _utcnow_iso(),
             "tenant_id": self.tenant_id,
         }
@@ -504,17 +555,17 @@ class TenantService:
             cursor.execute("""
                 INSERT INTO employees
                   (id, name, email, department, manager, risk_rating,
-                   hits_count, total_simulations, created_at, tenant_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   hits_count, total_simulations, created_at, tenant_id, phone)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (row["id"], row["name"], row["email"], row["department"],
-                  row["manager"], row["risk_rating"], 0, 0, row["created_at"], self.tenant_id))
+                  row["manager"], row["risk_rating"], 0, 0, row["created_at"], self.tenant_id, row["phone"]))
             conn.commit()
             conn.close()
         return row
 
     def update_employee(self, employee_id: str, data: dict) -> dict | None:
         allowed = {"name", "email", "department", "manager", "risk_rating",
-                   "hits_count", "total_simulations"}
+                   "hits_count", "total_simulations", "phone"}
         fields = {k: v for k, v in data.items() if k in allowed}
         if not fields:
             return self.get_employee(employee_id)
@@ -530,12 +581,14 @@ class TenantService:
             conn.close()
         return self.get_employee(employee_id)
 
-    def get_employee(self, employee_id: str) -> dict | None:
+    def get_employee(self, employee_id: str, mask: bool = True) -> dict | None:
         conn = _get_conn()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM employees WHERE id = ? AND tenant_id = ?", (employee_id, self.tenant_id))
         row = _fetchone_dict(cursor)
         conn.close()
+        if row and mask and row.get("phone"):
+            row["phone"] = mask_phone(row["phone"])
         return row
 
     def delete_employee(self, employee_id: str) -> bool:
@@ -569,6 +622,7 @@ class TenantService:
                     name=name, email=email,
                     department=row.get("department", ""),
                     manager=row.get("manager", ""),
+                    phone=row.get("phone", ""),
                 )
                 success_count += 1
             except Exception as exc:
@@ -603,11 +657,12 @@ class TenantService:
         return rows
 
     def create_template(self, name: str, category: str, subject: str, body: str,
-                         description: str = "", thumbnail: str = "", theme: str = "") -> dict:
+                         description: str = "", thumbnail: str = "", theme: str = "",
+                         channel: str = "email") -> dict:
         row = {
             "id": str(uuid.uuid4()), "name": name, "category": category, "theme": theme,
             "subject": subject, "body": body, "description": description,
-            "thumbnail": thumbnail, "is_global": False,
+            "thumbnail": thumbnail, "is_global": False, "channel": channel or "email",
             "created_at": _utcnow_iso(), "tenant_id": self.tenant_id,
         }
         with _db_lock:
@@ -616,10 +671,11 @@ class TenantService:
             cursor.execute("""
                 INSERT INTO templates
                   (id, name, category, theme, subject, body, description, thumbnail,
-                   is_global, created_at, tenant_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                   is_global, created_at, tenant_id, channel)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             """, (row["id"], row["name"], row["category"], row["theme"], row["subject"],
-                  row["body"], row["description"], row["thumbnail"], row["created_at"], self.tenant_id))
+                  row["body"], row["description"], row["thumbnail"], row["created_at"], self.tenant_id,
+                  row["channel"]))
             conn.commit()
             conn.close()
         return row
@@ -700,6 +756,7 @@ class TenantService:
             conn.close()
             row["domains"] = json.loads(row["domains"] or "[]")
             row["email_configs"] = json.loads(row["email_configs"] or "[]")
+            row["whatsapp_configs"] = json.loads(row.get("whatsapp_configs") or "[]")
             return row
 
         tenant = self.get_tenant(self.tenant_id)
@@ -709,11 +766,12 @@ class TenantService:
             "name": tenant["company_name"],
             "domains": [],
             "primary_color": tenant["primary_color"],
-            "logo_url": "",
+            "logo_url": tenant.get("logo_url") or "",
             "sso_client_id": "",
             "sso_tenant_id": "",
             "sso_client_secret": "",
             "email_configs": [],
+            "whatsapp_configs": [],
         }
 
     def save_settings(self, data: dict) -> dict:
@@ -760,6 +818,18 @@ class TenantService:
                 merged["sendgrid_api_key"] = existing.get("sendgrid_api_key", "")
             merged_configs.append(merged)
 
+        incoming_whatsapp = data.get("whatsapp_configs", current["whatsapp_configs"])
+        existing_whatsapp_by_id = {c["id"]: c for c in current["whatsapp_configs"] if c.get("id")}
+        merged_whatsapp = []
+        for cfg in incoming_whatsapp:
+            existing = existing_whatsapp_by_id.get(cfg.get("id"), {})
+            merged = dict(cfg)
+            # auth_token only overwritten when a new non-empty value is sent -
+            # same "write-only secret" pattern as smtp_password above.
+            if not merged.get("auth_token"):
+                merged["auth_token"] = existing.get("auth_token", "")
+            merged_whatsapp.append(merged)
+
         with _db_lock:
             conn = _get_conn()
             cursor = conn.cursor()
@@ -767,11 +837,11 @@ class TenantService:
                 UPDATE tenant_settings
                 SET name = ?, domains = ?, primary_color = ?, logo_url = ?,
                     sso_client_id = ?, sso_tenant_id = ?, sso_client_secret = ?,
-                    email_configs = ?
+                    email_configs = ?, whatsapp_configs = ?
                 WHERE id = 1
             """, (name, json.dumps(domains), primary_color, logo_url,
                   sso_client_id, sso_tenant_id, sso_client_secret,
-                  json.dumps(merged_configs)))
+                  json.dumps(merged_configs), json.dumps(merged_whatsapp)))
             conn.commit()
             conn.close()
         return self.get_settings_raw()
@@ -794,6 +864,17 @@ class TenantService:
                 "sendgrid_api_key_configured": bool(cfg.get("sendgrid_api_key")),
                 "smtp_password_configured": bool(cfg.get("smtp_password")),
             })
+        whatsapp_configs = []
+        for cfg in raw.get("whatsapp_configs", []):
+            whatsapp_configs.append({
+                "id": cfg.get("id"),
+                "name": cfg.get("name", ""),
+                "account_sid": cfg.get("account_sid", ""),
+                "from_number": cfg.get("from_number", ""),
+                # Never return the auth_token in plaintext - only whether one
+                # is configured, same pattern as smtp_password/sendgrid_api_key.
+                "is_configured": bool(cfg.get("auth_token") and cfg.get("account_sid") and cfg.get("from_number")),
+            })
         return {
             "tenant_id": self.tenant_id,
             "name": raw["name"],
@@ -807,6 +888,7 @@ class TenantService:
                 "tenant_id": raw["sso_tenant_id"],
             },
             "email_configs": email_configs,
+            "whatsapp_configs": whatsapp_configs,
         }
 
     # ------------------------------------------------------------------
@@ -897,13 +979,13 @@ class TenantService:
 
     def create_tenant(self, company_name: str, contact_email: str, admin_email: str,
                        contact_name: str = "", contact_mobile: str = "", designation: str = "",
-                       primary_color: str = "#7a1220") -> dict:
+                       primary_color: str = "#7a1220", logo_url: str = "") -> dict:
         row = {
             "id": str(uuid.uuid4()), "company_name": company_name,
             "contact_name": contact_name,
             "contact_email": contact_email, "contact_mobile": contact_mobile,
             "designation": designation, "admin_email": admin_email,
-            "primary_color": primary_color, "status": "active",
+            "primary_color": primary_color, "logo_url": logo_url, "status": "active",
             "created_at": _utcnow_iso(),
         }
         with _db_lock:
@@ -912,10 +994,10 @@ class TenantService:
             cursor.execute("""
                 INSERT INTO tenants
                   (id, company_name, contact_name, contact_email, contact_mobile, designation,
-                   admin_email, primary_color, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   admin_email, primary_color, logo_url, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (row["id"], row["company_name"], row["contact_name"], row["contact_email"], row["contact_mobile"],
-                  row["designation"], row["admin_email"], row["primary_color"],
+                  row["designation"], row["admin_email"], row["primary_color"], row["logo_url"],
                   row["status"], row["created_at"]))
             conn.commit()
             conn.close()

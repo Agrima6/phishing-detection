@@ -71,6 +71,21 @@ class Config:
         # Organisation name shown on the phishing landing page awareness banner
         self.ORG_NAME = os.environ.get('ORG_NAME', 'Provana')
 
+        # ── Twilio WhatsApp Business API (per-tenant overrides live in
+        # tenant_settings.whatsapp_configs, mirroring email_configs) ─────────
+        self.TWILIO_ACCOUNT_SID     = os.environ.get('TWILIO_ACCOUNT_SID', '')
+        self.TWILIO_AUTH_TOKEN      = os.environ.get('TWILIO_AUTH_TOKEN', '')
+        # Twilio WhatsApp-enabled sender, e.g. 'whatsapp:+14155238886'
+        self.TWILIO_WHATSAPP_FROM   = os.environ.get('TWILIO_WHATSAPP_FROM', '')
+
+        # ── Transactional platform email (registration/onboarding/approval) ──
+        # Prefer Resend (HTTPS API) over the SMTP settings above for these -
+        # this box's outbound SMTP to Gmail is blocked at the network level
+        # (confirmed via ENETUNREACH on a sibling project on this same VPS),
+        # so plain SMTP silently hangs here rather than erroring cleanly.
+        self.RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
+        self.PLATFORM_EMAIL_FROM = os.environ.get('PLATFORM_EMAIL_FROM', '')
+
         # ── Clerk authentication (admin dashboard login) ─────────────────────
         self.CLERK_PUBLISHABLE_KEY = os.environ.get('CLERK_PUBLISHABLE_KEY', '')
         self.CLERK_SECRET_KEY      = os.environ.get('CLERK_SECRET_KEY', '')
@@ -84,6 +99,10 @@ class Config:
             # SendGrid
             'sendgrid_from_email':  self.SENDGRID_FROM_EMAIL,
             'sendgrid_from_name':   self.SENDGRID_FROM_NAME,
+            # Twilio WhatsApp
+            'twilio_account_sid':   self.TWILIO_ACCOUNT_SID,
+            'twilio_auth_token':    self.TWILIO_AUTH_TOKEN,
+            'twilio_whatsapp_from': self.TWILIO_WHATSAPP_FROM,
             # Google Gemini AI
             'google_service_account_json': self.GOOGLE_SERVICE_ACCOUNT_JSON,
             'google_genai_model':           self.GOOGLE_GENAI_MODEL,

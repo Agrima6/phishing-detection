@@ -25,6 +25,8 @@ except ImportError:
 
 import smtplib
 import base64
+import bcrypt
+import jwt as pyjwt
 import dns.resolver
 import requests
 from email.mime.multipart import MIMEMultipart
@@ -45,12 +47,13 @@ from gemini_service import (
 )
 
 from config import config
-from phishing_campaign_service import PhishingCampaignService
+from phishing_campaign_service import PhishingCampaignService, mask_phone
 from tenant_service import (
     TenantService, save_chatbot_lead, list_chatbot_leads,
     list_blog_posts, get_blog_post, create_blog_post, update_blog_post, delete_blog_post,
 )
 from auth_clerk import auth_clerk_bp, is_clerk_configured
+from auth_service import AuthService, RegistrationService, generate_temp_password
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -72,6 +75,16 @@ if os.environ.get("RENDER"):
 app.register_blueprint(auth_clerk_bp)
 
 logging.basicConfig(level=logging.INFO)
+
+# Fixed super-admin login, seeded idempotently on every startup. Overridable
+# via env vars; defaults match what's documented for this deployment.
+try:
+    AuthService().ensure_super_admin_seeded(
+        os.environ.get("SUPER_ADMIN_USERNAME", "Workmate123"),
+        os.environ.get("SUPER_ADMIN_PASSWORD", "Vinit123"),
+    )
+except Exception as exc:
+    logging.error(f"Super-admin seed failed: {exc}", exc_info=True)
 
 _sendgrid_client = SendGridAPIClient(config.SENDGRID_API_KEY) if config.SENDGRID_API_KEY else None
 
@@ -161,6 +174,76 @@ def _send_via_sendgrid(to_email: str, subject: str, body_html: str, sender_displ
     response = client.send(message)
     if response.status_code >= 400:
         raise RuntimeError(f"SendGrid error {response.status_code}: {response.body}")
+
+
+_E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
+
+
+def _default_whatsapp_config() -> dict:
+    """The global .env-configured Twilio sender - used whenever a campaign
+    has no whatsapp_config_id or the id can't be found. Mirrors
+    _default_email_config()."""
+    return {
+        "account_sid": config.TWILIO_ACCOUNT_SID,
+        "auth_token": config.TWILIO_AUTH_TOKEN,
+        "from_number": config.TWILIO_WHATSAPP_FROM,
+    }
+
+
+def _resolve_whatsapp_config(whatsapp_config_id: str | None, tenant_id: str = "default") -> dict:
+    """Resolve which Twilio sender profile a WhatsApp campaign should send
+    through. Mirrors _resolve_email_config(): falls back to the global .env
+    config when no profile is selected or it can't be found, so a campaign
+    never fails to send just because of a profile lookup."""
+    cfg = _default_whatsapp_config()
+    if not whatsapp_config_id:
+        return cfg
+    try:
+        raw = TenantService(tenant_id=tenant_id).get_settings_raw()
+        match = next((c for c in raw.get("whatsapp_configs", []) if c.get("id") == whatsapp_config_id), None)
+        if not match:
+            logging.warning(f"whatsapp_config_id {whatsapp_config_id} not found – using default gateway")
+            return cfg
+        cfg["account_sid"] = match.get("account_sid") or cfg["account_sid"]
+        cfg["auth_token"] = match.get("auth_token") or cfg["auth_token"]
+        cfg["from_number"] = match.get("from_number") or cfg["from_number"]
+    except Exception as exc:
+        logging.error(f"WhatsApp config resolution failed for {whatsapp_config_id}: {exc}", exc_info=True)
+    return cfg
+
+
+def _send_via_twilio_whatsapp(to_phone: str, body: str, cfg: dict) -> dict:
+    """Send a WhatsApp message via Twilio's REST API directly with `requests`
+    (no twilio SDK dependency), mirroring how SendGrid is called via its
+    HTTPS API rather than SMTP. Raises RuntimeError on any non-2xx response
+    or Twilio error payload so the retry/backoff loop in
+    _dispatch_single_whatsapp treats it the same as an SMTP failure."""
+    account_sid = cfg.get("account_sid")
+    auth_token = cfg.get("auth_token")
+    from_number = cfg.get("from_number")
+    if not account_sid or not auth_token:
+        raise RuntimeError("Twilio is not configured (missing account SID / auth token)")
+    if not from_number:
+        raise RuntimeError("Twilio is not configured (missing WhatsApp sender number)")
+    to_number = to_phone if to_phone.startswith("whatsapp:") else f"whatsapp:{to_phone}"
+    from_field = from_number if from_number.startswith("whatsapp:") else f"whatsapp:{from_number}"
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+    resp = requests.post(
+        url,
+        data={"To": to_number, "From": from_field, "Body": body},
+        auth=(account_sid, auth_token),
+        timeout=30,
+    )
+    payload = {}
+    try:
+        payload = resp.json()
+    except Exception:
+        pass
+    if resp.status_code >= 300:
+        err_msg = payload.get("message") or resp.text
+        raise RuntimeError(f"Twilio error {resp.status_code}: {err_msg}")
+    logging.info(f"WhatsApp sent -> {to_phone} (sid={payload.get('sid')}, status={payload.get('status')})")
+    return payload
 
 
 def _retry_delay(attempt: int) -> float:
@@ -305,11 +388,13 @@ def _run_send_job(campaign_id: str, label: str, do_validate: bool, tenant_id: st
                         finished_at=datetime.now(timezone.utc).isoformat())
             return
 
+        is_whatsapp = campaign.get("channel") == "whatsapp"
+
         recipients_list = svc.list_recipients(campaign_id)
         to_send = [r for r in recipients_list if r.get("status") == "pending"]
 
         skipped_invalid = 0
-        if do_validate and to_send:
+        if do_validate and to_send and not is_whatsapp:
             validation_mode = (config.PRE_SEND_VALIDATION or "dns").lower()
             if validation_mode not in {"dns", "smtp", "none"}:
                 validation_mode = "dns"
@@ -339,7 +424,10 @@ def _run_send_job(campaign_id: str, label: str, do_validate: bool, tenant_id: st
                         finished_at=datetime.now(timezone.utc).isoformat())
             return
 
-        sent_count, failed_count, errors = _send_batch(svc, campaign, to_send, label=label)
+        if is_whatsapp:
+            sent_count, failed_count, errors = _send_whatsapp_batch(svc, campaign, to_send, label=label)
+        else:
+            sent_count, failed_count, errors = _send_batch(svc, campaign, to_send, label=label)
         _job_update(campaign_id,
                     state="done",
                     sent=sent_count,
@@ -616,22 +704,33 @@ _ROLE_LABELS = {
 }
 
 
+def _generate_session_token(user: dict) -> str:
+    payload = {
+        "sub": user["id"], "email": user["email"], "role": user["role"],
+        "tenant_id": user.get("tenant_id"), "name": user.get("display_name") or user["email"],
+        "iat": datetime.now(timezone.utc), "exp": datetime.now(timezone.utc) + timedelta(hours=12),
+    }
+    return pyjwt.encode(payload, config.SECRET_KEY, algorithm="HS256")
+
+
 def _get_session_info() -> dict | None:
-    # Token = "clerk" means the browser has a Flask session populated by a verified
-    # Clerk sign-in (see auth_clerk.clerk_session). The role comes from the Clerk
-    # user's public_metadata.role, set per-user in the Clerk Dashboard.
+    # X-Admin-Key carries a signed JWT issued by /api/auth/login - stateless,
+    # so no server-side session lookup is needed on every request. Replaces
+    # the old Clerk-cookie check entirely.
     provided = request.headers.get("X-Admin-Key") or ""
-    if provided != "clerk":
+    if not provided:
         return None
-    user = flask_session.get("clerk_user")
-    if not user:
+    try:
+        payload = pyjwt.decode(provided, config.SECRET_KEY, algorithms=["HS256"])
+    except Exception:
         return None
-    role = user.get("role")
+    role = payload.get("role")
     if role not in _ROLE_LABELS:
         return None
-    return {"role": role, "username": user.get("name") or user.get("email", "Clerk User"),
+    return {"role": role, "username": payload.get("name") or payload.get("email", "User"),
             "label": _ROLE_LABELS.get(role, role),
-            "tenant_id": user.get("tenant_id") or "default"}
+            "tenant_id": payload.get("tenant_id") or "default",
+            "user_id": payload.get("sub")}
 
 
 def _get_role() -> str | None:
@@ -864,6 +963,80 @@ def _dispatch_single_email(svc: PhishingCampaignService, campaign: dict, recipie
     logging.info(f"Email sent -> {recipient['email']} (campaign {campaign['id']})")
 
 
+def _dispatch_single_whatsapp(svc: PhishingCampaignService, campaign: dict, recipient: dict,
+                              whatsapp_cfg: dict | None = None) -> None:
+    """WhatsApp counterpart of _dispatch_single_email - same retry/backoff
+    shape via SEND_RETRY_COUNT/SEND_RETRY_BASE_SEC, same mark_sent/mark_failed
+    bookkeeping. The phone number lives in recipient['phone']; recipient['email']
+    holds the same normalized number as the dedup identity key (see
+    PhishingCampaignService.add_recipients), which is what mark_sent/mark_failed
+    match against."""
+    whatsapp_cfg = whatsapp_cfg or _resolve_whatsapp_config(
+        campaign.get("whatsapp_config_id"), tenant_id=campaign.get("tenant_id", "default")
+    )
+    phishing_cfg = config.get_phishing_config()
+    base_url = phishing_cfg["base_url"].rstrip("/")
+    click_track_url = f"{base_url}/auth/verify/{recipient['tracking_token']}"
+
+    phone = recipient.get("phone") or recipient["email"]
+    message = campaign.get("message_body") or ""
+    first_name = _first_name(recipient.get("name", phone))
+    greeting = _ist_greeting()
+    message = (message
+               .replace("{{name}}", recipient.get("name", phone))
+               .replace("{{first_name}}", first_name)
+               .replace("{{greeting}}", greeting)
+               .replace("{{phishing_link}}", click_track_url))
+
+    retries = max(1, config.SEND_RETRY_COUNT)
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            _send_via_twilio_whatsapp(phone, message, whatsapp_cfg)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= retries or (not _is_transient_send_error(exc)):
+                break
+            wait_s = _retry_delay(attempt)
+            logging.warning(
+                f"Transient WhatsApp send error for {phone} (attempt {attempt}/{retries}): {exc}. "
+                f"Retrying in {wait_s:.2f}s"
+            )
+            time.sleep(wait_s)
+
+    if last_exc is not None:
+        raise last_exc
+
+    svc.mark_sent(campaign["id"], recipient["email"])
+    logging.info(f"WhatsApp sent -> {phone} (campaign {campaign['id']})")
+
+
+def _send_whatsapp_batch(svc, campaign, recipients, label="Send"):
+    """WhatsApp counterpart of _send_batch. Twilio's REST API is stateless
+    per-request (no persistent connection to reuse like SMTP), so this is
+    simpler: same pacing (SEND_DELAY_SEC) and per-recipient retry, just no
+    connection-reuse/reconnect branch."""
+    sent_count = 0
+    failed_count = 0
+    errors = []
+    cfg = _resolve_whatsapp_config(campaign.get("whatsapp_config_id"), tenant_id=campaign.get("tenant_id", "default"))
+    for i, r in enumerate(recipients):
+        try:
+            _dispatch_single_whatsapp(svc, campaign, r, cfg)
+            sent_count += 1
+        except Exception as exc:
+            phone = r.get("phone") or r.get("email")
+            logging.error(f"{label} failed to {phone}: {exc}")
+            svc.mark_failed(campaign["id"], r["email"], str(exc))
+            failed_count += 1
+            errors.append(str(exc))
+        if i < len(recipients) - 1:
+            time.sleep(max(0.0, config.SEND_DELAY_SEC))
+    return sent_count, failed_count, errors
+
+
 def _validate_email_dns_only(email: str) -> dict:
     """Fast validation for bulk sends: format + DNS/MX only."""
     email = (email or "").strip().lower()
@@ -978,14 +1151,29 @@ def campaigns():
         except Exception:
             return _json_response({"error": "Invalid JSON body"}, 400)
         name = (body.get("name") or "").strip()
-        subject = (body.get("subject") or "").strip()
-        body_html = (body.get("body_html") or "").strip()
+        channel = (body.get("channel") or "email").strip().lower()
+        if channel not in ("email", "whatsapp"):
+            return _json_response({"error": "channel must be 'email' or 'whatsapp'"}, 400)
         sender_name = (body.get("sender_name") or "Security Team").strip()
         redirect_url = (body.get("redirect_url") or "").strip()
         email_config_id = (body.get("email_config_id") or "").strip() or None
-        if not name or not subject or not body_html:
-            return _json_response({"error": "name, subject, and body_html are required"}, 400)
-        campaign = svc.create_campaign(name, subject, body_html, sender_name, redirect_url, email_config_id)
+        whatsapp_config_id = (body.get("whatsapp_config_id") or "").strip() or None
+
+        if channel == "whatsapp":
+            message_body = (body.get("message_body") or "").strip()
+            if not name or not message_body:
+                return _json_response({"error": "name and message_body are required for WhatsApp campaigns"}, 400)
+            campaign = svc.create_campaign(
+                name, subject="", body_html="", sender_name=sender_name, redirect_url=redirect_url,
+                channel="whatsapp", whatsapp_config_id=whatsapp_config_id, message_body=message_body,
+            )
+        else:
+            subject = (body.get("subject") or "").strip()
+            body_html = (body.get("body_html") or "").strip()
+            if not name or not subject or not body_html:
+                return _json_response({"error": "name, subject, and body_html are required"}, 400)
+            campaign = svc.create_campaign(name, subject, body_html, sender_name, redirect_url, email_config_id,
+                                           channel="email")
         _log_audit("CAMPAIGN", f"Campaign \"{name}\" created")
         return _json_response(campaign, 201)
     except Exception as exc:
@@ -1033,8 +1221,18 @@ def recipients(campaign_id):
         if not _can(role, "add_recipients"):
             return _unauthorized() if not role else _forbidden("add_recipients")
     svc = PhishingCampaignService(tenant_id=_get_tenant_id())
+
+    def _masked(recipients_list):
+        out = []
+        for r in recipients_list:
+            r = dict(r)
+            if r.get("phone"):
+                r["phone"] = mask_phone(r["phone"])
+            out.append(r)
+        return out
+
     if request.method == "GET":
-        return _json_response(svc.list_recipients(campaign_id))
+        return _json_response(_masked(svc.list_recipients(campaign_id)))
     try:
         body = request.get_json(force=True)
     except Exception:
@@ -1042,31 +1240,43 @@ def recipients(campaign_id):
     raw_list = body.get("recipients", [])
     if not isinstance(raw_list, list):
         return _json_response({"error": "'recipients' must be a list"}, 400)
+
+    campaign = svc.get_campaign(campaign_id)
+    is_whatsapp = bool(campaign) and campaign.get("channel") == "whatsapp"
+
     valid = []
     invalid = []
     warnings = []
-    for item in raw_list:
-        email = (item.get("email") or "").strip().lower()
-        if not _EMAIL_RE.match(email):
-            invalid.append(email)
-            continue
-        # Quick DNS/MX domain check (no SMTP probe – keep it fast)
-        domain = email.split("@", 1)[1]
-        mx_hosts = _get_mx_hosts(domain)
-        if mx_hosts is None:
-            invalid.append(email)
-            warnings.append(f"{email}: domain '{domain}' has no mail server (MX record)")
-            continue
-        valid.append({"email": email, "name": item.get("name", email)})
+    if is_whatsapp:
+        for item in raw_list:
+            phone = (item.get("phone") or "").strip()
+            if not _E164_RE.match(phone):
+                invalid.append(phone)
+                warnings.append(f"{phone or '(empty)'}: must be a valid E.164 number, e.g. +919876543210")
+                continue
+            valid.append({"phone": phone, "name": item.get("name", phone)})
+    else:
+        for item in raw_list:
+            email = (item.get("email") or "").strip().lower()
+            if not _EMAIL_RE.match(email):
+                invalid.append(email)
+                continue
+            # Quick DNS/MX domain check (no SMTP probe – keep it fast)
+            domain = email.split("@", 1)[1]
+            mx_hosts = _get_mx_hosts(domain)
+            if mx_hosts is None:
+                invalid.append(email)
+                warnings.append(f"{email}: domain '{domain}' has no mail server (MX record)")
+                continue
+            valid.append({"email": email, "name": item.get("name", email)})
     if not valid:
-        return _json_response({"error": "No valid e-mail addresses provided", "invalid": invalid,
+        return _json_response({"error": "No valid recipients provided", "invalid": invalid,
                                 "warnings": warnings}, 400)
     created = svc.add_recipients(campaign_id, valid)
-    result = {"added": len(created), "invalid": invalid, "recipients": created}
+    result = {"added": len(created), "invalid": invalid, "recipients": _masked(created)}
     if warnings:
         result["warnings"] = warnings
     if created:
-        campaign = svc.get_campaign(campaign_id)
         campaign_label = campaign["name"] if campaign else campaign_id
         _log_audit("CAMPAIGN", f"{len(created)} recipient(s) added to campaign \"{campaign_label}\"")
     return _json_response(result, 201)
@@ -2120,7 +2330,11 @@ def employees():
             department=(body.get("department") or "").strip(),
             manager=(body.get("manager") or "").strip(),
             risk_rating=(body.get("riskRating") or "low"),
+            phone=(body.get("phone") or "").strip(),
         )
+        if employee.get("phone"):
+            employee = dict(employee)
+            employee["phone"] = mask_phone(employee["phone"])
         _log_audit("EMPLOYEE", f"Employee \"{name}\" ({email}) added")
         return _json_response(employee, 201)
     except Exception as exc:
@@ -2355,6 +2569,36 @@ def test_email_config():
         return _json_response({"success": False, "error": str(exc)}, 200)
 
 
+@app.route("/api/tenant/settings/test-whatsapp", methods=["POST", "OPTIONS"])
+def test_whatsapp_config():
+    """Sends a real test WhatsApp message using a given (unsaved) config,
+    mirroring /api/tenant/settings/test-email."""
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_settings"):
+        return _unauthorized() if not role else _forbidden("manage_settings")
+    body = request.get_json(force=True, silent=True) or {}
+    cfg = body.get("config") or {}
+    recipient = (body.get("recipient") or "").strip()
+    if not recipient:
+        return _json_response({"success": False, "error": "Recipient phone number is required"}, 400)
+    if not _E164_RE.match(recipient):
+        return _json_response({"success": False, "error": "Recipient must be a valid E.164 number, e.g. +919876543210"}, 400)
+    try:
+        whatsapp_cfg = {
+            "account_sid": cfg.get("account_sid", ""),
+            "auth_token": cfg.get("auth_token", ""),
+            "from_number": cfg.get("from_number", ""),
+        }
+        _send_via_twilio_whatsapp(recipient, "This is a test WhatsApp message from your PhishShield tenant settings.",
+                                  whatsapp_cfg)
+        return _json_response({"success": True, "message": f"Test WhatsApp message sent to {recipient}"})
+    except Exception as exc:
+        logging.error(f"Test WhatsApp error: {exc}", exc_info=True)
+        return _json_response({"success": False, "error": str(exc)}, 200)
+
+
 _CLERK_API_BASE = "https://api.clerk.com/v1"
 
 
@@ -2441,30 +2685,37 @@ def admin_tenants():
     if not company_name or not contact_email or not admin_email:
         return _json_response({"error": "Company name, contact email, and admin email are required"}, 400)
 
+    logo_url = (body.get("logo_url") or "").strip()
     tenant = svc.create_tenant(
         company_name=company_name, contact_email=contact_email, admin_email=admin_email,
         contact_name=contact_name, contact_mobile=contact_mobile, designation=designation,
-        primary_color=primary_color,
+        primary_color=primary_color, logo_url=logo_url,
+    )
+
+    auth_svc = AuthService()
+    temp_password = generate_temp_password()
+    auth_svc.create_user(
+        email=admin_email, password=temp_password, display_name=contact_name,
+        role="admin", tenant_id=tenant["id"], must_change_password=True,
     )
 
     invite_warning = None
-    if config.CLERK_SECRET_KEY:
-        resp = requests.post(
-            f"{_CLERK_API_BASE}/invitations",
-            headers=_clerk_headers(),
-            json={
-                "email_address": admin_email,
-                "public_metadata": {"role": "admin", "tenant_id": tenant["id"]},
-                "notify": True,
-                "ignore_existing": True,
-                "redirect_url": f"{config.FRONTEND_URL}/auth/welcome",
-            },
-            timeout=15,
+    login_url = f"{config.FRONTEND_URL}/auth/login"
+    try:
+        _send_platform_email(
+            admin_email,
+            f"{company_name} is set up on Workmate Shield - here's your login",
+            f"""<p>Hi {escape(contact_name or '')},</p>
+                <p><strong>{escape(company_name)}</strong> has been set up on Workmate Shield.
+                You can now sign in to your dashboard:</p>
+                <p><a href="{login_url}">{login_url}</a></p>
+                <p>Email: {escape(admin_email)}<br>Temporary password: <strong>{escape(temp_password)}</strong></p>
+                <p>You'll be asked to set a new password the first time you sign in.</p>
+                <p>- The Workmate Shield team</p>""",
         )
-        if resp.status_code >= 400:
-            invite_warning = f"Company created, but the invite email failed: {resp.json().get('errors', resp.text)}"
-    else:
-        invite_warning = "Company created, but Clerk is not configured on this server so no invite was sent."
+    except Exception as exc:
+        logging.error(f"Onboard-company email failed: {exc}", exc_info=True)
+        invite_warning = "Company created, but the login email failed to send."
 
     _log_audit("TENANT", f"Onboarded company \"{company_name}\" (admin: {admin_email})")
     result = dict(tenant)
@@ -2503,6 +2754,301 @@ def admin_tenant_detail(tenant_id):
     return _json_response(tenant)
 
 
+# ---------------------------------------------------------------------------
+# Custom email/password auth (replaces Clerk as the login path)
+# ---------------------------------------------------------------------------
+
+def _send_platform_email(to_email: str, subject: str, body_html: str) -> None:
+    """Transactional email for registration/onboarding/approval - separate
+    from the phishing-simulation send path above. Prefers Resend (HTTPS,
+    works on this host) over SMTP (blocked here - see config.py)."""
+    if config.RESEND_API_KEY and config.PLATFORM_EMAIL_FROM:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {config.RESEND_API_KEY}"},
+            json={"from": config.PLATFORM_EMAIL_FROM, "to": to_email, "subject": subject, "html": body_html},
+            timeout=15,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Resend error {resp.status_code}: {resp.text}")
+        return
+    if config.SENDGRID_API_KEY and config.SENDGRID_FROM_EMAIL:
+        _send_via_sendgrid(to_email, subject, body_html, config.SENDGRID_FROM_NAME, _default_email_config())
+        return
+    with _smtp_connection(_default_email_config()) as conn:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = formataddr((config.SMTP_FROM_NAME, config.SMTP_FROM_EMAIL))
+        msg["To"] = to_email
+        msg.attach(MIMEText(body_html, "html"))
+        conn.sendmail(config.SMTP_FROM_EMAIL, [to_email], msg.as_string())
+
+
+@app.route("/api/auth/login", methods=["POST", "OPTIONS"])
+def auth_login():
+    if request.method == "OPTIONS":
+        return "", 200
+    body = request.get_json(force=True, silent=True) or {}
+    email = (body.get("email") or "").strip()
+    password = body.get("password") or ""
+    if not email or not password:
+        return _json_response({"error": "Email/username and password are required"}, 400)
+
+    svc = AuthService()
+    user = svc.find_by_email(email)
+    if not user or user["status"] != "active" or not svc.verify_password(user, password):
+        return _json_response({"error": "Invalid email or password"}, 401)
+
+    token = _generate_session_token(user)
+    _log_audit("SECURITY", f"\"{user['email']}\" signed in")
+    return _json_response({
+        "token": token,
+        "email": user["email"],
+        "name": user["display_name"] or user["email"],
+        "role": user["role"],
+        "tenant_id": user["tenant_id"] or "default",
+        "must_change_password": user["must_change_password"],
+    })
+
+
+@app.route("/api/auth/logout", methods=["POST", "OPTIONS"])
+def auth_logout():
+    if request.method == "OPTIONS":
+        return "", 200
+    # Stateless JWT - nothing to invalidate server-side; the frontend just
+    # discards the token. Kept as a route so the frontend has a stable
+    # endpoint to call regardless of how sessions are implemented.
+    return _json_response({"logged_out": True})
+
+
+@app.route("/api/auth/me", methods=["GET", "OPTIONS"])
+def auth_me():
+    if request.method == "OPTIONS":
+        return "", 200
+    info = _get_session_info()
+    if not info:
+        return _unauthorized()
+    return _json_response(info)
+
+
+@app.route("/api/auth/change-password", methods=["POST", "OPTIONS"])
+def auth_change_password():
+    if request.method == "OPTIONS":
+        return "", 200
+    info = _get_session_info()
+    if not info:
+        return _unauthorized()
+    body = request.get_json(force=True, silent=True) or {}
+    current_password = body.get("current_password") or ""
+    new_password = body.get("new_password") or ""
+    if len(new_password) < 8:
+        return _json_response({"error": "New password must be at least 8 characters"}, 400)
+
+    svc = AuthService()
+    user = svc.find_by_id(info["user_id"])
+    if not user or not svc.verify_password(user, current_password):
+        return _json_response({"error": "Current password is incorrect"}, 401)
+    svc.reset_password(user["id"], new_password, must_change_password=False)
+    _log_audit("SECURITY", f"\"{user['email']}\" changed their password")
+    return _json_response({"changed": True})
+
+
+# ---------------------------------------------------------------------------
+# Public registration -> onboarding -> maker-checker approval pipeline
+# ---------------------------------------------------------------------------
+
+@app.route("/api/public/register", methods=["POST", "OPTIONS"])
+def public_register():
+    """Step 1: basic company details from the landing page. Emails the
+    contact a link to the full onboarding form (step 2) - nothing is
+    reviewable by the super admin until that's submitted."""
+    if request.method == "OPTIONS":
+        return "", 200
+    body = request.get_json(force=True, silent=True) or {}
+    company_name = (body.get("company_name") or "").strip()
+    contact_name = (body.get("contact_name") or "").strip()
+    contact_email = (body.get("contact_email") or "").strip().lower()
+    contact_mobile = (body.get("contact_mobile") or "").strip()
+    designation = (body.get("designation") or "").strip()
+    if not company_name or not contact_name or not contact_email:
+        return _json_response({"error": "Company name, contact name, and contact email are required"}, 400)
+
+    reg_svc = RegistrationService()
+    registration, raw_token = reg_svc.create_registration(
+        company_name=company_name, contact_name=contact_name, contact_email=contact_email,
+        contact_mobile=contact_mobile, designation=designation,
+    )
+    onboarding_url = f"{config.FRONTEND_URL}/onboarding/{raw_token}"
+
+    email_warning = None
+    try:
+        _send_platform_email(
+            contact_email,
+            f"Finish onboarding {company_name} to Workmate Shield",
+            f"""<p>Hi {escape(contact_name)},</p>
+                <p>Thanks for registering <strong>{escape(company_name)}</strong> with Workmate Shield.
+                Continue your onboarding here:</p>
+                <p><a href="{onboarding_url}">{onboarding_url}</a></p>
+                <p>- The Workmate Shield team</p>""",
+        )
+    except Exception as exc:
+        logging.error(f"Registration email failed: {exc}", exc_info=True)
+        email_warning = "Registration received, but the onboarding email failed to send."
+
+    result = {"id": registration["id"], "company_name": registration["company_name"]}
+    if email_warning:
+        result["email_warning"] = email_warning
+    # Local-debug convenience only - mirrors EXPOSE_LOCAL_ONBOARDING_URL used
+    # elsewhere in similar flows; never enabled by default in production.
+    if os.environ.get("EXPOSE_ONBOARDING_URL") == "true":
+        result["debug_onboarding_url"] = onboarding_url
+    return _json_response(result, 201)
+
+
+@app.route("/api/public/onboarding/<token>", methods=["GET", "POST", "OPTIONS"])
+def public_onboarding(token):
+    if request.method == "OPTIONS":
+        return "", 200
+    reg_svc = RegistrationService()
+
+    if request.method == "GET":
+        reg = reg_svc.get_by_token(token)
+        if not reg:
+            return _json_response({"error": "This onboarding link isn't valid"}, 404)
+        return _json_response({
+            "company_name": reg["company_name"], "contact_name": reg["contact_name"],
+            "contact_email": reg["contact_email"], "contact_mobile": reg["contact_mobile"],
+            "designation": reg["designation"], "status": reg["status"],
+        })
+
+    body = request.get_json(force=True, silent=True) or {}
+    address = (body.get("address") or "").strip()
+    gst_number = (body.get("gst_number") or "").strip()
+    employee_count = (body.get("employee_count") or "").strip()
+    logo_url = (body.get("logo_url") or "").strip()
+    primary_color = (body.get("primary_color") or "#7a1220").strip()
+    if not address:
+        return _json_response({"error": "Headquarters address is required"}, 400)
+
+    try:
+        reg = reg_svc.submit_onboarding(token, address, gst_number, employee_count, logo_url, primary_color)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, 409)
+    if not reg:
+        return _json_response({"error": "This onboarding link isn't valid"}, 404)
+    return _json_response({"status": reg["status"]})
+
+
+@app.route("/api/public/onboarding/<token>/logo", methods=["POST", "OPTIONS"])
+def public_onboarding_logo(token):
+    """Logo upload during onboarding - unauthenticated like the rest of this
+    step, but scoped to a single valid registration token so it can't be
+    used as an open file-upload endpoint."""
+    if request.method == "OPTIONS":
+        return "", 200
+    reg_svc = RegistrationService()
+    reg = reg_svc.get_by_token(token)
+    if not reg:
+        return _json_response({"error": "This onboarding link isn't valid"}, 404)
+
+    file = request.files.get("logo")
+    if not file or not file.filename:
+        return _json_response({"error": "No file provided"}, 400)
+    ext = Path(file.filename).suffix.lower()
+    if ext not in _ALLOWED_IMAGE_EXTS:
+        return _json_response({"error": f"File type not allowed. Use: {sorted(_ALLOWED_IMAGE_EXTS)}"}, 400)
+    data = file.read()
+    if len(data) > _MAX_IMAGE_BYTES:
+        return _json_response({"error": "File exceeds 5 MB limit"}, 400)
+
+    filename = f"{uuid.uuid4().hex}{ext}"
+    (_UPLOADS_DIR / filename).write_bytes(data)
+    return _json_response({"url": f"/static/uploads/{filename}"})
+
+
+@app.route("/api/admin/registrations", methods=["GET", "OPTIONS"])
+def admin_registrations():
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_tenants"):
+        return _unauthorized() if not role else _forbidden("manage_tenants")
+    status = request.args.get("status")
+    return _json_response(RegistrationService().list_all(status=status))
+
+
+@app.route("/api/admin/registrations/<registration_id>", methods=["GET", "OPTIONS"])
+def admin_registration_detail(registration_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_tenants"):
+        return _unauthorized() if not role else _forbidden("manage_tenants")
+    reg = RegistrationService().get(registration_id)
+    if not reg:
+        return _json_response({"error": "Registration not found"}, 404)
+    return _json_response(reg)
+
+
+@app.route("/api/admin/registrations/<registration_id>/approve", methods=["POST", "OPTIONS"])
+def admin_registration_approve(registration_id):
+    """Maker-checker approval: creates the tenant + its first admin login,
+    and emails the temp password. Everything up to here (registration,
+    onboarding submission) was the 'maker' side; this is the 'checker'."""
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_tenants"):
+        return _unauthorized() if not role else _forbidden("manage_tenants")
+
+    reg_svc = RegistrationService()
+    try:
+        result = reg_svc.approve(registration_id)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, 409)
+
+    tenant, user, temp_password = result["tenant"], result["user"], result["temp_password"]
+    login_url = f"{config.FRONTEND_URL}/auth/login"
+    email_warning = None
+    try:
+        _send_platform_email(
+            user["email"],
+            f"{tenant['company_name']} is approved on Workmate Shield - here's your login",
+            f"""<p>Hi {escape(tenant['contact_name'] or '')},</p>
+                <p><strong>{escape(tenant['company_name'])}</strong> has been approved on Workmate Shield.
+                You can now sign in to your dashboard:</p>
+                <p><a href="{login_url}">{login_url}</a></p>
+                <p>Email: {escape(user['email'])}<br>Temporary password: <strong>{escape(temp_password)}</strong></p>
+                <p>You'll be asked to set a new password the first time you sign in.</p>
+                <p>- The Workmate Shield team</p>""",
+        )
+    except Exception as exc:
+        logging.error(f"Approval email failed: {exc}", exc_info=True)
+        email_warning = "Approved, but the notification email failed to send."
+
+    _log_audit("TENANT", f"Approved registration for \"{tenant['company_name']}\"")
+    out = {"tenant": tenant, "user_email": user["email"]}
+    if email_warning:
+        out["email_warning"] = email_warning
+    return _json_response(out)
+
+
+@app.route("/api/admin/registrations/<registration_id>/reject", methods=["POST", "OPTIONS"])
+def admin_registration_reject(registration_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_tenants"):
+        return _unauthorized() if not role else _forbidden("manage_tenants")
+    body = request.get_json(force=True, silent=True) or {}
+    reason = (body.get("reason") or "").strip()
+    reg = RegistrationService().reject(registration_id, reason)
+    if not reg:
+        return _json_response({"error": "Registration not found"}, 404)
+    _log_audit("TENANT", f"Rejected registration for \"{reg['company_name']}\"")
+    return _json_response(reg)
+
+
 @app.route("/api/auth/branding", methods=["GET", "OPTIONS"])
 def branding():
     if request.method == "OPTIONS":
@@ -2510,7 +3056,7 @@ def branding():
     try:
         raw = TenantService(tenant_id=_get_tenant_id()).get_settings_raw()
         return _json_response({
-            "tenant_id": "default",
+            "tenant_id": _get_tenant_id(),
             "tenant_name": raw["name"],
             "logo_url": raw["logo_url"],
             "primary_color": raw["primary_color"],

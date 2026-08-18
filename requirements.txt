@@ -19,9 +19,16 @@ google-auth>=2.29.0
 # DNS lookups – validate email domains (MX records) before sending
 dnspython==2.7.0
 
-# Clerk – authentication for the admin dashboard
+# Clerk – authentication for the admin dashboard (legacy; kept installed
+# while any remaining Clerk-only routes are phased out, no longer the
+# primary login path)
 clerk-backend-api>=6.0.0
 requests>=2.31.0
+
+# Password hashing + signed session tokens for the custom email/password
+# auth (super admin + tenant admins), replacing Clerk as the primary login.
+bcrypt>=4.1.0
+PyJWT>=2.9.0
 
 # Postgres driver – used in production when DATABASE_URL is set (persistent
 # storage on hosts without a disk, e.g. Render's free tier). Local dev without
