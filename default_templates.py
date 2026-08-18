@@ -272,6 +272,37 @@ def build_default_templates(banner_image_url: str) -> list[dict]:
             ),
         },
         {
+            "name": "WhatsApp: Package Delivery Failed",
+            "category": "link-click",
+            "theme": "Shipping & Delivery",
+            "channel": "whatsapp",
+            "subject": "",
+            "description": "Courier-style WhatsApp delivery-failure message urging the recipient to tap a link to reschedule.",
+            "thumbnail": "",
+            "body": (
+                "Hi {{first_name}}, this is Express Shipping. We couldn't deliver your package today - "
+                "the address on file looks incomplete.\n\n"
+                "Please confirm your delivery details within 24 hours or the package will be returned to sender:\n"
+                "{{phishing_link}}\n\n"
+                "Tracking: EX-88213-402"
+            ),
+        },
+        {
+            "name": "WhatsApp: IT Account Verification Required",
+            "category": "credential-harvester",
+            "theme": "IT & Security",
+            "channel": "whatsapp",
+            "subject": "",
+            "description": "IT-support-style WhatsApp message claiming unusual account activity, pressuring a quick tap to \"verify\".",
+            "thumbnail": "",
+            "body": (
+                "{{greeting}} {{first_name}}, this is Corporate IT Security.\n\n"
+                "We detected unusual sign-in activity on your account. To keep it secure, please verify your "
+                "identity now:\n{{phishing_link}}\n\n"
+                "If you don't verify within 1 hour, your account access may be temporarily suspended."
+            ),
+        },
+        {
             "name": "Invoice Payment Overdue",
             "category": "link-click",
             "theme": "Finance & Payroll",

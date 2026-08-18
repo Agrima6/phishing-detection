@@ -155,6 +155,29 @@ def _table_columns(cursor, table_name: str) -> set:
     return {row[1] for row in cursor.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
+def mask_phone(phone: str | None) -> str:
+    """Mask a phone number for display, keeping the country code and the
+    first 2 + last 2 digits visible (e.g. '+919876543210' -> '+91 98****10').
+    The raw number is still used internally for sending; this is applied only
+    to API responses. Returns '' unchanged for missing/blank input."""
+    if not phone:
+        return phone or ""
+    phone = phone.strip()
+    has_plus = phone.startswith("+")
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) <= 6:
+        return phone  # too short to usefully mask
+    # Heuristic: first 2-3 digits are treated as country code (kept visible),
+    # then 2 more digits of the subscriber number, then mask, then last 2.
+    cc_len = 2
+    visible_head = digits[:cc_len + 2]
+    visible_tail = digits[-2:]
+    masked_len = max(0, len(digits) - len(visible_head) - len(visible_tail))
+    masked = "*" * masked_len
+    result = f"{visible_head[:cc_len]} {visible_head[cc_len:]}{masked}{visible_tail}"
+    return f"+{result}" if has_plus else result
+
+
 def _is_duplicate_key_error(exc: Exception) -> bool:
     if isinstance(exc, sqlite3.IntegrityError):
         return True
@@ -263,6 +286,18 @@ def _init_db():
             if "tenant_id" not in existing_campaign_cols:
                 cursor.execute("ALTER TABLE campaigns ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
                 cursor.execute("CREATE INDEX IF NOT EXISTS IX_campaigns_tenant_id ON campaigns (tenant_id)")
+            # WhatsApp channel support (additive, idempotent) - existing rows
+            # default to 'email' so every campaign created before this change
+            # keeps behaving exactly as it did.
+            if "channel" not in existing_campaign_cols:
+                cursor.execute("ALTER TABLE campaigns ADD COLUMN channel TEXT NOT NULL DEFAULT 'email'")
+            if "whatsapp_config_id" not in existing_campaign_cols:
+                cursor.execute("ALTER TABLE campaigns ADD COLUMN whatsapp_config_id TEXT")
+            if "message_body" not in existing_campaign_cols:
+                cursor.execute("ALTER TABLE campaigns ADD COLUMN message_body TEXT")
+            existing_recipient_cols = _table_columns(cursor, "recipients")
+            if "phone" not in existing_recipient_cols:
+                cursor.execute("ALTER TABLE recipients ADD COLUMN phone TEXT")
             for idx in index_statements:
                 cursor.execute(idx)
             conn.commit()
@@ -306,13 +341,18 @@ class PhishingCampaignService:
     def create_campaign(self, name: str, subject: str, body_html: str,
                         sender_name: str = "Security Team",
                         redirect_url: str = "",
-                        email_config_id: str | None = None) -> dict:
+                        email_config_id: str | None = None,
+                        channel: str = "email",
+                        whatsapp_config_id: str | None = None,
+                        message_body: str | None = None) -> dict:
         campaign_id = str(uuid.uuid4())
         now = _utcnow_iso()
         row = {
             "id": campaign_id, "name": name, "subject": subject,
             "body_html": body_html, "sender_name": sender_name,
             "redirect_url": redirect_url, "email_config_id": email_config_id,
+            "channel": channel or "email", "whatsapp_config_id": whatsapp_config_id,
+            "message_body": message_body,
             "status": "draft", "created_at": now, "updated_at": now,
             "total_sent": 0, "total_opened": 0, "total_clicked": 0,
             "total_failed": 0, "total_duplicates": 0, "tenant_id": self.tenant_id,
@@ -322,16 +362,18 @@ class PhishingCampaignService:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO campaigns
-                  (id, name, subject, body_html, sender_name, redirect_url, email_config_id, status,
+                  (id, name, subject, body_html, sender_name, redirect_url, email_config_id,
+                   channel, whatsapp_config_id, message_body, status,
                    created_at, updated_at, total_sent, total_opened, total_clicked,
                    total_failed, total_duplicates, tenant_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (row["id"], row["name"], row["subject"], row["body_html"],
-                  row["sender_name"], row["redirect_url"], row["email_config_id"], row["status"],
+                  row["sender_name"], row["redirect_url"], row["email_config_id"],
+                  row["channel"], row["whatsapp_config_id"], row["message_body"], row["status"],
                   row["created_at"], row["updated_at"], 0, 0, 0, 0, 0, self.tenant_id))
             conn.commit()
             conn.close()
-        logging.info(f"Campaign created: {campaign_id} – {name} (tenant={self.tenant_id})")
+        logging.info(f"Campaign created: {campaign_id} – {name} (tenant={self.tenant_id}, channel={row['channel']})")
         return row
 
     def list_campaigns(self) -> list:
@@ -420,20 +462,41 @@ class PhishingCampaignService:
              race so a single bad row never aborts the whole batch.
 
         Time complexity: O(N) DB calls collapses to O(2) for N recipients.
+
+        WhatsApp recipients (entries with a `phone` but no `email`): the
+        `email` column predates this feature and still carries a NOT NULL +
+        UNIQUE(campaign_id, email) constraint that SQLite can't cheaply drop
+        without a full table rebuild. Rather than risk that migration, we
+        reuse the same column as the dedup identity key by storing the
+        normalized phone number into it too - the real number always also
+        lives in the dedicated `phone` column, which is what's used for
+        actually sending and for display. This keeps the change additive and
+        non-destructive to the existing SQLite file.
         """
         if not recipients:
             return []
         now = _utcnow_iso()
 
-        # Normalize and de-duplicate input within this batch (lower-case email).
+        # Normalize and de-duplicate input within this batch. For email
+        # recipients: lower-case email. For WhatsApp (phone-only) recipients:
+        # normalize the phone number and use it as both the identity key
+        # (stored in `email`) and the actual number (stored in `phone`).
         seen_in_batch: set[str] = set()
         normalized: list[dict] = []
         for r in recipients:
             email = (r.get("email") or "").strip().lower()
+            phone = (r.get("phone") or "").strip()
+            if not email and phone:
+                identity = phone
+                if identity in seen_in_batch:
+                    continue
+                seen_in_batch.add(identity)
+                normalized.append({"email": identity, "phone": phone, "name": r.get("name", phone)})
+                continue
             if not email or email in seen_in_batch:
                 continue
             seen_in_batch.add(email)
-            normalized.append({"email": email, "name": r.get("name", email)})
+            normalized.append({"email": email, "phone": None, "name": r.get("name", email)})
 
         if not normalized:
             return []
@@ -468,6 +531,7 @@ class PhishingCampaignService:
                     "id": str(uuid.uuid4()),
                     "campaign_id": campaign_id,
                     "email": r["email"],
+                    "phone": r.get("phone"),
                     "name": r["name"],
                     "tracking_token": secrets.token_urlsafe(24),
                     "status": "pending",
@@ -483,12 +547,12 @@ class PhishingCampaignService:
             if new_rows:
                 insert_sql = """
                     INSERT INTO recipients
-                      (id, campaign_id, email, name, tracking_token, status,
+                      (id, campaign_id, email, phone, name, tracking_token, status,
                        sent_at, opened_at, open_count, click_count, clicked_at, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """
                 params = [
-                    (row["id"], row["campaign_id"], row["email"], row["name"],
+                    (row["id"], row["campaign_id"], row["email"], row["phone"], row["name"],
                      row["tracking_token"], row["status"],
                      row["sent_at"], row["opened_at"],
                      row["open_count"], row["click_count"],
@@ -507,7 +571,7 @@ class PhishingCampaignService:
                     for row in new_rows:
                         try:
                             cursor.execute(insert_sql,
-                                           (row["id"], row["campaign_id"], row["email"], row["name"],
+                                           (row["id"], row["campaign_id"], row["email"], row["phone"], row["name"],
                                             row["tracking_token"], row["status"],
                                             row["sent_at"], row["opened_at"],
                                             row["open_count"], row["click_count"],
@@ -821,12 +885,20 @@ class PhishingCampaignService:
         output = io.StringIO()
         writer = csv.DictWriter(
             output,
-            fieldnames=["email", "name", "status", "sent_at", "opened_at", "open_count",
+            fieldnames=["email", "phone", "name", "status", "sent_at", "opened_at", "open_count",
                          "clicked_at", "click_count", "send_count"],
             extrasaction="ignore",
         )
         writer.writeheader()
-        writer.writerows(recipients)
+        # Mask phone numbers in the exported report - the CSV is downloaded
+        # from the dashboard just like any other recipient listing.
+        masked_rows = []
+        for r in recipients:
+            row = dict(r)
+            if row.get("phone"):
+                row["phone"] = mask_phone(row["phone"])
+            masked_rows.append(row)
+        writer.writerows(masked_rows)
         return output.getvalue()
 
     def get_dashboard_stats(self, campaign_id: str) -> dict:
