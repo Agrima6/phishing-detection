@@ -1437,7 +1437,8 @@ def resend_campaign(campaign_id):
     if reset_count == 0:
         return _json_response({"message": "No recipients to resend to"}, 200)
     queued = len(svc.list_recipients(campaign_id))
-    started = _start_send_job(campaign_id, label="Resend", queued=queued, do_validate=False)
+    started = _start_send_job(campaign_id, label="Resend", queued=queued, do_validate=False,
+                               tenant_id=campaign["tenant_id"])
     if not started:
         return _json_response({"error": "A send is already running for this campaign"}, 409)
     _log_audit("CAMPAIGN", f"Campaign \"{campaign['name']}\" resent to {queued} recipient(s)")
@@ -1470,7 +1471,8 @@ def send_campaign(campaign_id):
     if not to_send:
         return _json_response({"message": "No pending recipients – all already sent or none added"}, 200)
 
-    started = _start_send_job(campaign_id, label="Send", queued=len(to_send), do_validate=True)
+    started = _start_send_job(campaign_id, label="Send", queued=len(to_send), do_validate=True,
+                               tenant_id=campaign["tenant_id"])
     if not started:
         return _json_response({"error": "A send is already running for this campaign"}, 409)
     _log_audit("CAMPAIGN", f"Campaign \"{campaign['name']}\" launched to {len(to_send)} recipient(s)")
@@ -1549,7 +1551,8 @@ def resend_failed_campaign(campaign_id):
     cleared = svc.clear_failed_recipients(campaign_id)
     if cleared == 0:
         return _json_response({"message": "No failed recipients to resend"}, 200)
-    started = _start_send_job(campaign_id, label="ResendFailed", queued=cleared, do_validate=True)
+    started = _start_send_job(campaign_id, label="ResendFailed", queued=cleared, do_validate=True,
+                               tenant_id=campaign["tenant_id"])
     if not started:
         return _json_response({"error": "A send is already running for this campaign"}, 409)
     _log_audit("CAMPAIGN", f"Campaign \"{campaign['name']}\" resent to {cleared} previously-failed recipient(s)")
