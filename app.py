@@ -2733,6 +2733,8 @@ def admin_tenants():
     primary_color = (body.get("primary_color") or "#7a1220").strip()
     if not company_name or not contact_email or not admin_email:
         return _json_response({"error": "Company name, contact email, and admin email are required"}, 400)
+    if AuthService().find_by_email(admin_email):
+        return _json_response({"error": f"{admin_email} already has a Workmate Shield account."}, 409)
 
     logo_url = (body.get("logo_url") or "").strip()
     tenant = svc.create_tenant(

@@ -232,6 +232,17 @@ class RegistrationService:
         if reg["status"] != "SUBMITTED":
             raise ValueError(f"Cannot approve a registration in status {reg['status']}")
 
+        # Login email must be globally unique (it's a real credential, not
+        # tenant-scoped simulation data) - fail with a clear error before
+        # creating anything, rather than a raw 500 mid-approval leaving an
+        # orphaned tenant with no admin user.
+        auth_svc = AuthService()
+        if auth_svc.find_by_email(reg["contact_email"]):
+            raise ValueError(
+                f"{reg['contact_email']} already has a Workmate Shield account. "
+                "Use a different contact email for this company, or remove the existing account first."
+            )
+
         tenant_svc = TenantService()
         tenant = tenant_svc.create_tenant(
             company_name=reg["company_name"], contact_email=reg["contact_email"],
@@ -240,7 +251,6 @@ class RegistrationService:
             primary_color=reg["primary_color"] or "#7a1220", logo_url=reg["logo_url"] or "",
         )
 
-        auth_svc = AuthService()
         temp_password = generate_temp_password()
         user = auth_svc.create_user(
             email=reg["contact_email"], password=temp_password, display_name=reg["contact_name"],
