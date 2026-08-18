@@ -107,15 +107,22 @@ def serve_upload(filename):
 
 def _default_email_config() -> dict:
     """The global .env-configured provider — today's (only) behavior, used
-    whenever a campaign has no email_config_id or the id can't be found."""
+    whenever a campaign has no email_config_id or the id can't be found.
+
+    Prefers Resend (HTTPS) over the .env EMAIL_PROVIDER setting when a
+    Resend key is configured - this host's outbound SMTP to Gmail is
+    blocked at the network level, so EMAIL_PROVIDER=gmail/outlook silently
+    hangs here rather than sending or erroring cleanly."""
+    provider = "resend" if config.RESEND_API_KEY and config.PLATFORM_EMAIL_FROM else config.EMAIL_PROVIDER
     return {
-        "provider": config.EMAIL_PROVIDER,
+        "provider": provider,
         "smtp_host": config.SMTP_HOST, "smtp_port": config.SMTP_PORT,
         "smtp_use_ssl": config.SMTP_USE_SSL,
         "smtp_username": config.SMTP_USERNAME, "smtp_password": config.SMTP_PASSWORD,
         "smtp_from_email": config.SMTP_FROM_EMAIL, "smtp_from_name": config.SMTP_FROM_NAME,
         "sendgrid_api_key": config.SENDGRID_API_KEY,
         "sendgrid_from_email": config.SENDGRID_FROM_EMAIL, "sendgrid_from_name": config.SENDGRID_FROM_NAME,
+        "resend_api_key": config.RESEND_API_KEY, "resend_from_email": config.PLATFORM_EMAIL_FROM,
     }
 
 
@@ -613,10 +620,38 @@ def _send_via_smtp(to_email: str, subject: str, body_html: str, sender_display_n
             s.send_message(msg)
 
 
+def _send_via_resend(to_email: str, subject: str, body_html: str, sender_display_name: str,
+                     cfg: dict, reply_to: str | None = None) -> None:
+    """Send via Resend's HTTPS API - see _default_email_config() for why
+    this is preferred over SMTP on this host."""
+    api_key = cfg.get("resend_api_key")
+    from_email = cfg.get("resend_from_email")
+    if not api_key or not from_email:
+        raise RuntimeError("Resend is not configured (missing RESEND_API_KEY / PLATFORM_EMAIL_FROM)")
+    payload = {
+        "from": f"{sender_display_name} <{from_email}>",
+        "to": to_email,
+        "subject": subject,
+        "html": body_html,
+    }
+    if reply_to:
+        payload["reply_to"] = reply_to
+    resp = requests.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json=payload,
+        timeout=15,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Resend error {resp.status_code}: {resp.text}")
+
+
 def _send_email(to_email: str, subject: str, body_html: str, sender_display_name: str,
-                cfg: dict, _conn: smtplib.SMTP | None = None) -> None:
+                cfg: dict, _conn: smtplib.SMTP | None = None, reply_to: str | None = None) -> None:
     """Route to the configured email provider."""
-    if cfg["provider"] == 'sendgrid':
+    if cfg["provider"] == 'resend':
+        _send_via_resend(to_email, subject, body_html, sender_display_name, cfg, reply_to=reply_to)
+    elif cfg["provider"] == 'sendgrid':
         _send_via_sendgrid(to_email, subject, body_html, sender_display_name, cfg)
     else:  # gmail / outlook
         _send_via_smtp(to_email, subject, body_html, sender_display_name, cfg, _conn=_conn)
@@ -931,6 +966,19 @@ def _dispatch_single_email(svc: PhishingCampaignService, campaign: dict, recipie
     else:
         body_html = body_html + pixel_img
 
+    # Default the sender identity to the company that's actually running
+    # this simulation (captured at onboarding) instead of a hardcoded
+    # generic name/address, unless the campaign set its own sender_name.
+    tenant_id = campaign.get("tenant_id", "default")
+    sender_display_name = campaign.get("sender_name") or "Security Team"
+    reply_to = None
+    if tenant_id != "default":
+        tenant = TenantService().get_tenant(tenant_id)
+        if tenant:
+            if not campaign.get("sender_name"):
+                sender_display_name = f"{tenant['company_name']} Security Team"
+            reply_to = tenant.get("contact_email") or None
+
     retries = max(1, config.SEND_RETRY_COUNT)
     last_exc = None
     for attempt in range(1, retries + 1):
@@ -939,9 +987,10 @@ def _dispatch_single_email(svc: PhishingCampaignService, campaign: dict, recipie
                 to_email=recipient["email"],
                 subject=campaign["subject"],
                 body_html=body_html,
-                sender_display_name=campaign.get("sender_name", "Security Team"),
+                sender_display_name=sender_display_name,
                 cfg=email_cfg,
                 _conn=_conn,
+                reply_to=reply_to,
             )
             last_exc = None
             break
@@ -3078,6 +3127,96 @@ def branding():
     except Exception as exc:
         logging.error(f"Branding error: {exc}", exc_info=True)
         return _json_response({"error": f"Server error: {exc}"}, 500)
+
+
+# ---------------------------------------------------------------------------
+# Team management - a tenant admin inviting their own colleagues, scoped to
+# the current session's own tenant_id only (never a URL-supplied one, so one
+# company's admin can never see or touch another company's team).
+# ---------------------------------------------------------------------------
+
+_TEAM_INVITABLE_ROLES = {"admin", "operator", "auditor", "template_author"}
+
+def _team_user_view(u: dict) -> dict:
+    return {
+        "id": u["id"], "email": u["email"], "name": u["display_name"],
+        "role": u["role"], "status": u["status"],
+        "must_change_password": u["must_change_password"], "created_at": u["created_at"],
+    }
+
+
+@app.route("/api/tenant/team", methods=["GET", "POST", "OPTIONS"])
+def tenant_team():
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_users"):
+        return _unauthorized() if not role else _forbidden("manage_users")
+    tenant_id = _get_tenant_id()
+    auth_svc = AuthService()
+
+    if request.method == "GET":
+        return _json_response([_team_user_view(u) for u in auth_svc.list_by_tenant(tenant_id)])
+
+    body = request.get_json(force=True, silent=True) or {}
+    name = (body.get("name") or "").strip()
+    email = (body.get("email") or "").strip().lower()
+    member_role = (body.get("role") or "operator").strip()
+    if not name or not email:
+        return _json_response({"error": "Name and email are required"}, 400)
+    if member_role not in _TEAM_INVITABLE_ROLES:
+        return _json_response({"error": f"role must be one of {sorted(_TEAM_INVITABLE_ROLES)}"}, 400)
+    if auth_svc.find_by_email(email):
+        return _json_response({"error": "A user with this email already exists"}, 409)
+
+    tenant = TenantService().get_tenant(tenant_id)
+    company_name = tenant["company_name"] if tenant else "your company"
+    temp_password = generate_temp_password()
+    user = auth_svc.create_user(
+        email=email, password=temp_password, display_name=name,
+        role=member_role, tenant_id=tenant_id, must_change_password=True,
+    )
+
+    email_warning = None
+    login_url = f"{config.FRONTEND_URL}/auth/login"
+    try:
+        _send_platform_email(
+            email,
+            f"You've been added to {company_name} on Workmate Shield",
+            f"""<p>Hi {escape(name)},</p>
+                <p>You've been added as a <strong>{escape(_ROLE_LABELS.get(member_role, member_role))}</strong>
+                on {escape(company_name)}'s Workmate Shield workspace. Sign in here:</p>
+                <p><a href="{login_url}">{login_url}</a></p>
+                <p>Email: {escape(email)}<br>Temporary password: <strong>{escape(temp_password)}</strong></p>
+                <p>You'll be asked to set a new password the first time you sign in.</p>
+                <p>- The Workmate Shield team</p>""",
+        )
+    except Exception as exc:
+        logging.error(f"Team invite email failed: {exc}", exc_info=True)
+        email_warning = "Added, but the invite email failed to send."
+
+    _log_audit("SECURITY", f"Added \"{email}\" to the team as {member_role}")
+    out = _team_user_view(user)
+    if email_warning:
+        out["email_warning"] = email_warning
+    return _json_response(out, 201)
+
+
+@app.route("/api/tenant/team/<user_id>", methods=["DELETE", "OPTIONS"])
+def tenant_team_member(user_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_users"):
+        return _unauthorized() if not role else _forbidden("manage_users")
+    info = _get_session_info()
+    if info and info.get("user_id") == user_id:
+        return _json_response({"error": "You can't remove your own account"}, 400)
+    deleted = AuthService().delete_user(user_id, _get_tenant_id())
+    if not deleted:
+        return _json_response({"error": "User not found"}, 404)
+    _log_audit("SECURITY", f"Removed team member {user_id}")
+    return _json_response({"deleted": True})
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,7 @@ def _init_db():
         CREATE TABLE IF NOT EXISTS employees (
             id                 TEXT    NOT NULL PRIMARY KEY,
             name               TEXT    NOT NULL,
-            email              TEXT    NOT NULL UNIQUE,
+            email              TEXT    NOT NULL,
             department         TEXT    NOT NULL DEFAULT '',
             manager            TEXT    NOT NULL DEFAULT '',
             risk_rating        TEXT    NOT NULL DEFAULT 'low',
@@ -186,6 +186,59 @@ def _init_db():
                 cursor.execute("CREATE INDEX IF NOT EXISTS IX_employees_tenant_id ON employees (tenant_id)")
             if "phone" not in employee_cols:
                 cursor.execute("ALTER TABLE employees ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
+
+            # Bug fix: `email` was originally globally UNIQUE, so two
+            # different companies could never both have e.g. the same
+            # person's email in their employee directory - a real
+            # cross-tenant data leak/collision, not just a UX annoyance.
+            # Replace it with a per-tenant composite unique index.
+            if _using_postgres():
+                cursor.execute("""
+                    SELECT conname FROM pg_constraint c
+                    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+                    WHERE c.conrelid = 'employees'::regclass AND c.contype = 'u'
+                      AND a.attname = 'email' AND array_length(c.conkey, 1) = 1
+                """)
+                for (conname,) in cursor.fetchall():
+                    cursor.execute(f'ALTER TABLE employees DROP CONSTRAINT "{conname}"')
+            else:
+                cursor.execute("PRAGMA index_list(employees)")
+                for idx in cursor.fetchall():
+                    # idx columns: (seq, name, unique, origin, partial)
+                    if idx[2] == 1 and idx[3] == 'u':
+                        cursor.execute(f"PRAGMA index_info({idx[1]})")
+                        cols = cursor.fetchall()
+                        if len(cols) == 1 and cols[0][2] == 'email':
+                            # SQLite can't DROP an auto-index from an inline
+                            # column UNIQUE - the table itself has to be
+                            # rebuilt without that constraint.
+                            cursor.execute("ALTER TABLE employees RENAME TO employees_old_unique_migration")
+                            cursor.execute("""
+                                CREATE TABLE employees (
+                                    id                 TEXT    NOT NULL PRIMARY KEY,
+                                    name               TEXT    NOT NULL,
+                                    email              TEXT    NOT NULL,
+                                    department         TEXT    NOT NULL DEFAULT '',
+                                    manager            TEXT    NOT NULL DEFAULT '',
+                                    risk_rating        TEXT    NOT NULL DEFAULT 'low',
+                                    hits_count         INTEGER NOT NULL DEFAULT 0,
+                                    total_simulations  INTEGER NOT NULL DEFAULT 0,
+                                    created_at         TEXT    NOT NULL,
+                                    tenant_id          TEXT    NOT NULL DEFAULT 'default',
+                                    phone              TEXT    NOT NULL DEFAULT ''
+                                )
+                            """)
+                            cursor.execute("""
+                                INSERT INTO employees
+                                  (id, name, email, department, manager, risk_rating,
+                                   hits_count, total_simulations, created_at, tenant_id, phone)
+                                SELECT id, name, email, department, manager, risk_rating,
+                                       hits_count, total_simulations, created_at, tenant_id, phone
+                                FROM employees_old_unique_migration
+                            """)
+                            cursor.execute("DROP TABLE employees_old_unique_migration")
+                            break
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS UX_employees_tenant_email ON employees (tenant_id, email)")
             template_cols = _table_columns(cursor, "templates")
             if "tenant_id" not in template_cols:
                 cursor.execute("ALTER TABLE templates ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")

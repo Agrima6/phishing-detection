@@ -83,6 +83,28 @@ class AuthService:
             conn.close()
         return row
 
+    def list_by_tenant(self, tenant_id: str) -> list[dict]:
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE tenant_id = ? ORDER BY created_at DESC", (tenant_id,))
+        rows = _fetchall_dict(cursor)
+        conn.close()
+        for row in rows:
+            row["must_change_password"] = bool(row["must_change_password"])
+        return rows
+
+    def delete_user(self, user_id: str, tenant_id: str) -> bool:
+        # Scoped to tenant_id so one tenant's admin can never delete a
+        # user belonging to a different company.
+        with _db_lock:
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM users WHERE id = ? AND tenant_id = ?", (user_id, tenant_id))
+            deleted = cursor.rowcount > 0
+            conn.commit()
+            conn.close()
+        return deleted
+
     def reset_password(self, user_id: str, new_password: str, must_change_password: bool) -> None:
         password_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
         with _db_lock:
