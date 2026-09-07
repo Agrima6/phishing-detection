@@ -1525,9 +1525,29 @@ def send_campaign_status(campaign_id):
     if not _can(role, "send"):
         return _unauthorized() if not role else _forbidden("send")
     snap = _job_snapshot(campaign_id)
-    if not snap:
+    if snap:
+        return _json_response(snap)
+
+    # No in-memory job - either nothing was ever sent, or the backend
+    # process restarted mid-send (deploy, crash, dev-server reload) and lost
+    # its tracking dict. Reconstruct real progress from recipient rows
+    # instead of reporting "idle", which would hide partial sends.
+    svc = PhishingCampaignService(tenant_id=_get_tenant_id())
+    campaign = svc.get_campaign(campaign_id)
+    if not campaign or campaign.get("status") == "draft":
         return _json_response({"campaign_id": campaign_id, "state": "idle"})
-    return _json_response(snap)
+    recipients = svc.list_recipients(campaign_id)
+    if not recipients:
+        return _json_response({"campaign_id": campaign_id, "state": "idle"})
+    sent = sum(1 for r in recipients if r.get("status") == "sent")
+    failed = sum(1 for r in recipients if r.get("status") == "failed")
+    pending = sum(1 for r in recipients if r.get("status") == "pending")
+    return _json_response({
+        "campaign_id": campaign_id,
+        "state": "sending" if pending else "done",
+        "sent": sent, "failed": failed, "total": len(recipients),
+        "error": "Backend restarted mid-send - some recipients may be stuck pending" if pending else None,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -2888,12 +2908,15 @@ def auth_login():
 
     token = _generate_session_token(user)
     _log_audit("SECURITY", f"\"{user['email']}\" signed in")
+    tenant_id = user["tenant_id"] or "default"
+    company_name = TenantService(tenant_id=tenant_id).get_settings_raw()["name"]
     return _json_response({
         "token": token,
         "email": user["email"],
         "name": user["display_name"] or user["email"],
         "role": user["role"],
-        "tenant_id": user["tenant_id"] or "default",
+        "tenant_id": tenant_id,
+        "company_name": company_name,
         "must_change_password": user["must_change_password"],
     })
 
