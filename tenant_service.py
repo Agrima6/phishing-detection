@@ -258,6 +258,8 @@ def _init_db():
                 cursor.execute("ALTER TABLE tenants ADD COLUMN contact_name TEXT NOT NULL DEFAULT ''")
             if "logo_url" not in tenants_cols:
                 cursor.execute("ALTER TABLE tenants ADD COLUMN logo_url TEXT NOT NULL DEFAULT ''")
+            if "email_configs" not in tenants_cols:
+                cursor.execute("ALTER TABLE tenants ADD COLUMN email_configs TEXT NOT NULL DEFAULT '[]'")
 
             for idx in index_statements:
                 cursor.execute(idx)
@@ -733,6 +735,32 @@ class TenantService:
             conn.close()
         return row
 
+    def update_template(self, template_id: str, name: str, category: str, subject: str, body: str,
+                         description: str = "", thumbnail: str = "", theme: str = "") -> dict | None:
+        """Edit a custom template. Scoped the same way delete_template is - a
+        tenant can only edit its own templates, never a global one."""
+        with _db_lock:
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE templates
+                SET name = ?, category = ?, theme = ?, subject = ?, body = ?, description = ?, thumbnail = ?
+                WHERE id = ? AND is_global = 0 AND tenant_id = ?
+            """, (name, category, theme, subject, body, description, thumbnail, template_id, self.tenant_id))
+            updated = cursor.rowcount > 0
+            conn.commit()
+            conn.close()
+        if not updated:
+            return None
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM templates WHERE id = ?", (template_id,))
+        row = _fetchone_dict(cursor)
+        conn.close()
+        if row:
+            row["is_global"] = bool(row["is_global"])
+        return row
+
     def delete_template(self, template_id: str) -> bool:
         with _db_lock:
             conn = _get_conn()
@@ -823,7 +851,7 @@ class TenantService:
             "sso_client_id": "",
             "sso_tenant_id": "",
             "sso_client_secret": "",
-            "email_configs": [],
+            "email_configs": json.loads(tenant.get("email_configs") or "[]"),
             "whatsapp_configs": [],
         }
 
@@ -831,17 +859,33 @@ class TenantService:
         current = self.get_settings_raw()
 
         if self.tenant_id != "default":
-            # Reduced settings surface for non-default tenants: only branding
-            # color is currently editable (see get_settings_raw note above).
+            # Reduced settings surface for non-default tenants: branding,
+            # logo, and email sender profiles are editable (see
+            # get_settings_raw note above - SSO customization is still a
+            # follow-up).
             branding = data.get("branding", {})
             primary_color = branding.get("primary_color", current["primary_color"])
+            logo_url = branding.get("logo_url", current["logo_url"])
             name = data.get("name", current["name"])
+
+            incoming_configs = data.get("email_configs", current["email_configs"])
+            existing_by_id = {c["id"]: c for c in current["email_configs"] if c.get("id")}
+            merged_configs = []
+            for cfg in incoming_configs:
+                existing = existing_by_id.get(cfg.get("id"), {})
+                merged = dict(cfg)
+                if not merged.get("smtp_password"):
+                    merged["smtp_password"] = existing.get("smtp_password", "")
+                if not merged.get("sendgrid_api_key"):
+                    merged["sendgrid_api_key"] = existing.get("sendgrid_api_key", "")
+                merged_configs.append(merged)
+
             with _db_lock:
                 conn = _get_conn()
                 cursor = conn.cursor()
                 cursor.execute(
-                    "UPDATE tenants SET company_name = ?, primary_color = ? WHERE id = ?",
-                    (name, primary_color, self.tenant_id),
+                    "UPDATE tenants SET company_name = ?, primary_color = ?, logo_url = ?, email_configs = ? WHERE id = ?",
+                    (name, primary_color, logo_url, json.dumps(merged_configs), self.tenant_id),
                 )
                 conn.commit()
                 conn.close()

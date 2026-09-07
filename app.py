@@ -2485,7 +2485,7 @@ def templates():
         return _json_response({"error": f"Server error: {exc}"}, 500)
 
 
-@app.route("/api/phish/templates/<template_id>", methods=["DELETE", "OPTIONS"])
+@app.route("/api/phish/templates/<template_id>", methods=["PUT", "DELETE", "OPTIONS"])
 def template_detail(template_id):
     if request.method == "OPTIONS":
         return "", 200
@@ -2494,6 +2494,26 @@ def template_detail(template_id):
         return _unauthorized() if not role else _forbidden("manage_templates")
     try:
         svc = TenantService(tenant_id=_get_tenant_id())
+
+        if request.method == "PUT":
+            body = request.get_json(force=True, silent=True) or {}
+            name = (body.get("name") or "").strip()
+            subject = (body.get("subject") or "").strip()
+            template_body = (body.get("body") or "").strip()
+            category = (body.get("category") or "").strip()
+            if not name or not subject or not template_body or not category:
+                return _json_response({"error": "Name, category, subject, and body are required"}, 400)
+            updated = svc.update_template(
+                template_id, name=name, category=category, subject=subject, body=template_body,
+                description=(body.get("description") or ""),
+                thumbnail=(body.get("thumbnail") or ""),
+                theme=(body.get("theme") or ""),
+            )
+            if not updated:
+                return _json_response({"error": "Template not found or is a global template"}, 404)
+            _log_audit("CAMPAIGN", f"Template \"{name}\" updated")
+            return _json_response(updated)
+
         existing = next((t for t in svc.list_templates() if (t.get("id") == template_id)), None)
         deleted = svc.delete_template(template_id)
         if not deleted:
