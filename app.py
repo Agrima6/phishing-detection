@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import re
+import socket
 import threading
 import time
 import uuid
@@ -47,7 +48,9 @@ from gemini_service import (
 )
 
 from config import config
-from phishing_campaign_service import PhishingCampaignService, mask_phone
+from phishing_campaign_service import (
+    PhishingCampaignService, mask_phone, get_send_job, start_send_job, update_send_job,
+)
 from tenant_service import (
     TenantService, save_chatbot_lead, list_chatbot_leads,
     list_blog_posts, get_blog_post, create_blog_post, update_blog_post, delete_blog_post,
@@ -360,21 +363,12 @@ def _send_batch(svc, campaign, recipients, label="Send"):
 # browser/proxy timeouts on big lists).
 # ---------------------------------------------------------------------------
 
-_send_jobs: dict[str, dict] = {}
-_send_jobs_lock = threading.Lock()
-
-
 def _job_snapshot(campaign_id: str) -> dict | None:
-    with _send_jobs_lock:
-        job = _send_jobs.get(campaign_id)
-        return dict(job) if job else None
+    return get_send_job(campaign_id)
 
 
 def _job_update(campaign_id: str, **fields) -> None:
-    with _send_jobs_lock:
-        job = _send_jobs.get(campaign_id)
-        if job is not None:
-            job.update(fields)
+    update_send_job(campaign_id, **fields)
 
 
 def _run_send_job(campaign_id: str, label: str, do_validate: bool, tenant_id: str = "default") -> None:
@@ -385,7 +379,8 @@ def _run_send_job(campaign_id: str, label: str, do_validate: bool, tenant_id: st
     already-verified tenant_id explicitly rather than this reading it from
     a request context that doesn't exist.
 
-    Progress + final result are written to _send_jobs[campaign_id].
+    Progress + final result are written to the send_jobs table (see
+    phishing_campaign_service.get_send_job/update_send_job).
     """
     try:
         svc = PhishingCampaignService(tenant_id=tenant_id)
@@ -450,25 +445,8 @@ def _run_send_job(campaign_id: str, label: str, do_validate: bool, tenant_id: st
 def _start_send_job(campaign_id: str, label: str, queued: int, do_validate: bool, tenant_id: str = "default") -> bool:
     """Register and start a background send job. Returns False if one is already
     running for this campaign."""
-    now = datetime.now(timezone.utc).isoformat()
-    with _send_jobs_lock:
-        existing = _send_jobs.get(campaign_id)
-        if existing and existing.get("state") in {"queued", "validating", "sending"}:
-            return False
-        _send_jobs[campaign_id] = {
-            "campaign_id": campaign_id,
-            "label": label,
-            "state": "queued",
-            "queued": queued,
-            "total": queued,
-            "sent": 0,
-            "failed": 0,
-            "skipped_invalid": 0,
-            "started_at": now,
-            "finished_at": None,
-            "error": None,
-            "error_detail": None,
-        }
+    if not start_send_job(campaign_id, label, queued):
+        return False
     t = threading.Thread(
         target=_run_send_job,
         args=(campaign_id, label, do_validate, tenant_id),
@@ -2658,7 +2636,33 @@ def test_email_config():
         return _json_response({"success": True, "message": f"Test email sent to {recipient}"})
     except Exception as exc:
         logging.error(f"Test email error: {exc}", exc_info=True)
-        return _json_response({"success": False, "error": str(exc)}, 200)
+        return _json_response({"success": False, "error": _friendly_email_error(exc)}, 200)
+
+
+def _friendly_email_error(exc: Exception) -> str:
+    """Translate the low-level SMTP/HTTP exceptions we actually see in
+    practice into something a tenant admin can act on, instead of a raw
+    socket errno or SMTP response code."""
+    if isinstance(exc, (socket.gaierror, socket.herror)):
+        return "Could not resolve the SMTP host - double-check the host name for typos."
+    if isinstance(exc, OSError) and exc.errno in (101, 113, 110):  # ENETUNREACH, EHOSTUNREACH, ETIMEDOUT
+        return ("Could not reach that SMTP host/port from this server. Verify the host and port "
+                "are correct, and that this network allows outbound connections to it.")
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return ("The SMTP server rejected the username/password. For Gmail/Outlook, make sure "
+                "you're using an app password (not your regular login password) and that the "
+                "account has app passwords or SMTP AUTH enabled.")
+    if isinstance(exc, smtplib.SMTPConnectError):
+        return "Could not connect to the SMTP server - check the host and port."
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return "The SMTP server closed the connection unexpectedly - check the port/SSL settings match what the provider expects."
+    if isinstance(exc, smtplib.SMTPSenderRefused):
+        return "The SMTP server rejected the From address - it may need to be a verified/authorized sender for this account."
+    msg = str(exc)
+    if "403" in msg and "Forbidden" in msg:
+        return ("The provider rejected the request (403 Forbidden) - the API key likely lacks "
+                "permission, or the sender email/domain isn't verified with that provider yet.")
+    return msg
 
 
 @app.route("/api/tenant/settings/test-whatsapp", methods=["POST", "OPTIONS"])

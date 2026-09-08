@@ -241,6 +241,22 @@ def _init_db():
             occurred_at TEXT NOT NULL
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS send_jobs (
+            campaign_id    TEXT NOT NULL PRIMARY KEY,
+            state          TEXT NOT NULL,
+            label          TEXT NOT NULL DEFAULT '',
+            queued         INTEGER NOT NULL DEFAULT 0,
+            total          INTEGER NOT NULL DEFAULT 0,
+            sent           INTEGER NOT NULL DEFAULT 0,
+            failed         INTEGER NOT NULL DEFAULT 0,
+            skipped_invalid INTEGER NOT NULL DEFAULT 0,
+            error          TEXT,
+            error_detail   TEXT,
+            started_at     TEXT NOT NULL,
+            finished_at    TEXT
+        )
+        """,
     ]
     # Indexes for performance – idempotent (IF NOT EXISTS)
     index_statements = [
@@ -323,6 +339,74 @@ def _ensure_db_ready():
             return
         _init_db()
         _db_initialized = True
+
+
+# ---------------------------------------------------------------------------
+# Send-job tracking (persisted, not in-memory)
+#
+# Gunicorn runs multiple worker *processes* (see _get_pg_pool above), each
+# with its own memory. A send job started by the worker that handles the
+# POST /send request is invisible to whichever worker later handles the
+# GET /send/status poll - an in-memory dict here would only be correct when
+# both requests happen to land on the same worker. Persisting to the DB
+# makes job state visible to every worker uniformly.
+# ---------------------------------------------------------------------------
+
+def get_send_job(campaign_id: str) -> dict | None:
+    _ensure_db_ready()
+    conn = _get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM send_jobs WHERE campaign_id = ?", (campaign_id,))
+    row = _fetchone_dict(cursor)
+    conn.close()
+    return row
+
+
+def start_send_job(campaign_id: str, label: str, queued: int) -> bool:
+    """Register a new job, unless one is already running for this campaign.
+    Returns False (and leaves the existing job untouched) if one is running."""
+    _ensure_db_ready()
+    now = _utcnow_iso()
+    with _db_lock:
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT state FROM send_jobs WHERE campaign_id = ?", (campaign_id,))
+            existing = _fetchone_dict(cursor)
+            if existing and existing["state"] in ("queued", "validating", "sending"):
+                return False
+            cursor.execute("""
+                INSERT INTO send_jobs (campaign_id, state, label, queued, total, sent, failed,
+                                        skipped_invalid, error, error_detail, started_at, finished_at)
+                VALUES (?, 'queued', ?, ?, 0, 0, 0, 0, NULL, NULL, ?, NULL)
+                ON CONFLICT (campaign_id) DO UPDATE SET
+                    state = 'queued', label = excluded.label, queued = excluded.queued,
+                    total = 0, sent = 0, failed = 0, skipped_invalid = 0,
+                    error = NULL, error_detail = NULL,
+                    started_at = excluded.started_at, finished_at = NULL
+            """, (campaign_id, label, queued, now))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+
+def update_send_job(campaign_id: str, **fields) -> None:
+    if not fields:
+        return
+    _ensure_db_ready()
+    with _db_lock:
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            set_clause = ", ".join(f"{k} = ?" for k in fields)
+            cursor.execute(
+                f"UPDATE send_jobs SET {set_clause} WHERE campaign_id = ?",
+                (*fields.values(), campaign_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 class PhishingCampaignService:
