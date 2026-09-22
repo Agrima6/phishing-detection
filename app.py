@@ -506,6 +506,34 @@ _start_scheduler()
 # ---------------------------------------------------------------------------
 
 _IMG_SRC_RE = re.compile(r'(<img\b[^>]*\bsrc=")([^"]+)(")', re.IGNORECASE)
+_HAS_IMG_TAG_RE = re.compile(r'<img\b', re.IGNORECASE)
+_FIRST_TABLE_OPEN_RE = re.compile(r'<table\b[^>]*>', re.IGNORECASE)
+
+
+def _inject_header_image(body_html: str, header_image_url: str | None) -> str:
+    """Make the template's uploaded header image part of the actual email,
+    not just the template-card thumbnail - it was previously only ever used
+    for the card, so recipients never saw it unless someone hand-pasted an
+    <img> tag into the body.
+
+    - No header_image_url -> body unchanged (no broken/empty <img>).
+    - body_html already contains an <img> (either from a template authored
+      with the image inline, like the seed "IT Password Expiration Notice"
+      template, or a custom one) -> left untouched, so we never duplicate it.
+    - Otherwise the image is inserted as the first row of the body's outer
+      <table>, or prepended if there's no table wrapper.
+    """
+    if not header_image_url or _HAS_IMG_TAG_RE.search(body_html):
+        return body_html
+    header_row = (
+        f'<tr><td><img src="{header_image_url}" width="600" alt="" '
+        f'style="display:block;width:100%;height:auto;border:0;" /></td></tr>'
+    )
+    match = _FIRST_TABLE_OPEN_RE.search(body_html)
+    if match:
+        idx = match.end()
+        return body_html[:idx] + header_row + body_html[idx:]
+    return f'<img src="{header_image_url}" width="600" alt="" style="display:block;width:100%;height:auto;border:0;" />' + body_html
 
 
 def _embed_images(body_html: str) -> tuple[str, list]:
@@ -1199,6 +1227,12 @@ def campaigns():
             body_html = (body.get("body_html") or "").strip()
             if not name or not subject or not body_html:
                 return _json_response({"error": "name, subject, and body_html are required"}, 400)
+            # Independent of whatever the frontend preview shows - the header
+            # image becomes part of the stored body_html itself, so every
+            # send path (Resend/SendGrid/SMTP) includes it with no further
+            # wiring needed. See _inject_header_image for the exact rules.
+            header_image_url = (body.get("header_image_url") or "").strip()
+            body_html = _inject_header_image(body_html, header_image_url)
             campaign = svc.create_campaign(name, subject, body_html, sender_name, redirect_url, email_config_id,
                                            channel="email")
         _log_audit("CAMPAIGN", f"Campaign \"{name}\" created")
@@ -2350,8 +2384,13 @@ def upload_image():
     dest      = _UPLOADS_DIR / filename
     dest.write_bytes(data)
 
-    # Return relative URL — works for both browser preview and CID embedding
-    public_url = f"/static/uploads/{filename}"
+    # Absolute URL, not relative - a relative /static/uploads/... path only
+    # resolves for the SMTP send path (_embed_images rewrites it to a cid:
+    # attachment) or the browser preview (same-origin). It's meaningless to
+    # a real email client for Resend/SendGrid sends, which just ship the
+    # HTML as-is with no local-file access - see _send_via_resend. Same
+    # pattern already used for the seed template's banner_url.
+    public_url = f"{config.PHISHING_BASE_URL.rstrip('/')}/static/uploads/{filename}"
     return _json_response({'url': public_url})
 
 
