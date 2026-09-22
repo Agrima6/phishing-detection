@@ -1713,6 +1713,21 @@ def _is_ms_scanner_ip(ip: str) -> bool:
     return any(ip.startswith(p) for p in _MS_SCANNER_IP_PREFIXES)
 
 
+# Google's published IP range for its crawlers/proxies, including the
+# GoogleImageProxy service Gmail uses to fetch every remote image (tracking
+# pixels included) on a recipient's behalf - see
+# https://developers.google.com/search/apis/ipranges/googlebot.json
+_GOOGLE_PROXY_IP_PREFIXES = ("66.249.",)
+_GOOGLE_IMAGE_PROXY_UA_RE = re.compile(r"googleimageproxy|gmailimageproxy", re.IGNORECASE)
+
+
+def _is_google_image_proxy(ip: str, ua: str) -> bool:
+    """True only for requests that are BOTH from Google's own IP range AND
+    self-identify as its image proxy - not just an IP match (Google's crawler
+    IPs are shared infra) and not just a UA match (spoofable by anyone)."""
+    return ip.startswith(_GOOGLE_PROXY_IP_PREFIXES) and bool(_GOOGLE_IMAGE_PROXY_UA_RE.search(ua))
+
+
 def _is_bot_request() -> tuple[bool, str]:
     """Detect if the current request is from an automated email scanner / bot.
 
@@ -1721,6 +1736,15 @@ def _is_bot_request() -> tuple[bool, str]:
     ua = request.headers.get("User-Agent", "") or ""
     accept = request.headers.get("Accept", "") or ""
     ip = _client_ip()
+
+    # 0. Google's own image-proxy fetcher - allowlisted ahead of the generic
+    # heuristics below. It's a server-side fetcher, not a browser, so it
+    # doesn't send a browser-typical Accept header and its UA is a fixed,
+    # deliberately old string - both of which the checks further down would
+    # otherwise flag as "bot" on every single Gmail open, since this proxy
+    # fetches the image for every real human open, not just prefetch/scans.
+    if _is_google_image_proxy(ip, ua):
+        return False, ""
 
     # 1. Microsoft Defender Safe Links / EOP scanner IP ranges
     if _is_ms_scanner_ip(ip):
