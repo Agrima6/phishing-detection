@@ -1653,7 +1653,15 @@ _BOT_UA_PATTERNS = re.compile(
     r"safelinks|defender(?!\b\s*for\s*end)|proofpoint|mimecast|barracuda|"
     r"forcepoint|symantec|trendmicro|mcafee|sophos|cisco\s*ironport|"
     # Image/link prefetchers
-    r"gmailimageproxy|googleimageproxy|yahoo!\s*slurp|"
+    # NOTE: GmailImageProxy/GoogleImageProxy are deliberately NOT matched here
+    # (removed - see git history for the old pattern). Gmail routes every
+    # image load, for every real human open, through this same proxy - there
+    # is no separate signature that distinguishes a genuine Gmail open from
+    # one of Google's own prefetch/scan requests, so blocking it as "bot"
+    # was silently discarding essentially all Gmail opens (Gmail being the
+    # dominant mail client for most recipient bases). The _MIN_OPEN_DELAY_SEC
+    # guard below still filters out near-instant prefetches/prescans.
+    r"yahoo!\s*slurp|"
     r"outlooksafelinks|outlookconnector|outlookprotection|outlooksafelink|"
     r"bingpreview|msnbot|"
     # Headless / programmatic clients
