@@ -808,24 +808,21 @@ class PhishingCampaignService:
         with _db_lock:
             conn2 = _get_conn()
             c2 = conn2.cursor()
+            # Deliberately does NOT touch status/opened_at/open_count/
+            # opened_* - a click is a distinct event from an email-open
+            # tracking-pixel hit and must never be treated as one, even
+            # though in practice a click almost always implies the email
+            # was seen. Those fields are owned exclusively by mark_opened().
             c2.execute("""
                 UPDATE recipients
-                SET status             = CASE WHEN status != 'opened' THEN 'opened' ELSE status END,
-                    click_count        = click_count + 1,
+                SET click_count        = click_count + 1,
                     clicked_at         = COALESCE(clicked_at, ?),
-                    opened_at          = COALESCE(opened_at, ?),
-                    open_count         = CASE WHEN opened_at IS NULL THEN open_count + 1 ELSE open_count END,
                     clicked_device_type= COALESCE(clicked_device_type, ?),
                     clicked_os         = COALESCE(clicked_os, ?),
                     clicked_ip         = COALESCE(clicked_ip, ?),
-                    clicked_ua         = COALESCE(clicked_ua, ?),
-                    opened_device_type = COALESCE(opened_device_type, ?),
-                    opened_os          = COALESCE(opened_os, ?),
-                    opened_ip          = COALESCE(opened_ip, ?),
-                    opened_ua          = COALESCE(opened_ua, ?)
+                    clicked_ua         = COALESCE(clicked_ua, ?)
                 WHERE tracking_token = ?
-            """, (now, now,
-                  device_type[:30], os_name[:30], ip[:64], user_agent[:300],
+            """, (now,
                   device_type[:30], os_name[:30], ip[:64], user_agent[:300],
                   token))
             c2.execute("""
