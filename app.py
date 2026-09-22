@@ -517,14 +517,21 @@ def _inject_header_image(body_html: str, header_image_url: str | None) -> str:
     <img> tag into the body.
 
     - No header_image_url -> body unchanged (no broken/empty <img>).
-    - body_html already contains an <img> (either from a template authored
-      with the image inline, like the seed "IT Password Expiration Notice"
-      template, or a custom one) -> left untouched, so we never duplicate it.
+    - body_html already contains an <img> (e.g. a template authored with the
+      image inline, like the seed "IT Password Expiration Notice" template)
+      -> that first <img>'s src is swapped for header_image_url instead of
+      inserting a second image. Without this, uploading a new header image
+      on such a template silently did nothing - the old hardcoded src in
+      the body was never touched, so "changing the logo" appeared broken.
     - Otherwise the image is inserted as the first row of the body's outer
       <table>, or prepended if there's no table wrapper.
     """
-    if not header_image_url or _HAS_IMG_TAG_RE.search(body_html):
+    if not header_image_url:
         return body_html
+    if _HAS_IMG_TAG_RE.search(body_html):
+        return _IMG_SRC_RE.sub(
+            lambda m: f'{m.group(1)}{header_image_url}{m.group(3)}', body_html, count=1
+        )
     header_row = (
         f'<tr><td><img src="{header_image_url}" width="600" alt="" '
         f'style="display:block;width:100%;height:auto;border:0;" /></td></tr>'
