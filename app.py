@@ -1703,8 +1703,15 @@ def _client_ip() -> str:
     xff = request.headers.get("X-Forwarded-For", "") or ""
     if xff:
         # First IP in the comma-separated list is the original client.
-        return xff.split(",")[0].strip()
-    return request.remote_addr or ""
+        ip = xff.split(",")[0].strip()
+    else:
+        ip = request.remote_addr or ""
+    # Nginx on this host prepends a stray backslash to the forwarded IP
+    # (seen live as "ip=\66.249.84.133" in tracking logs) - strip any
+    # leading non-IP characters so prefix checks like startswith("66.249.")
+    # against known ranges (Google's image proxy, Microsoft's scanner IPs)
+    # actually match instead of silently failing on every request.
+    return ip.lstrip("\\").strip()
 
 
 def _is_ms_scanner_ip(ip: str) -> bool:
