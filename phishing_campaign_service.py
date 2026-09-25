@@ -316,6 +316,24 @@ def _init_db():
                 cursor.execute("ALTER TABLE recipients ADD COLUMN phone TEXT")
             for idx in index_statements:
                 cursor.execute(idx)
+            # Idempotent invariant repair (CLICKED => OPENED): recipients
+            # that clicked without an observed pixel hit - including every row
+            # from before mark_clicked promoted opens - get opened_at set to
+            # their click time, then campaign counters are re-derived from the
+            # recipient rows so the dashboard can never show clicked > opened.
+            # No-op once the data is consistent.
+            cursor.execute("""
+                UPDATE recipients
+                SET opened_at = clicked_at, status = 'opened'
+                WHERE clicked_at IS NOT NULL AND opened_at IS NULL AND status != 'failed'
+            """)
+            cursor.execute("""
+                UPDATE campaigns
+                SET total_opened = (SELECT COUNT(*) FROM recipients r
+                                    WHERE r.campaign_id = campaigns.id AND r.opened_at IS NOT NULL)
+                WHERE total_opened != (SELECT COUNT(*) FROM recipients r
+                                       WHERE r.campaign_id = campaigns.id AND r.opened_at IS NOT NULL)
+            """)
             conn.commit()
         finally:
             # Always return the connection to the pool, even on failure -
@@ -761,29 +779,38 @@ class PhishingCampaignService:
 
     def mark_opened(self, token: str, *, ip: str = "", user_agent: str = "",
                     device_type: str = "", os_name: str = "") -> bool:
+        """Record a tracking-pixel hit. opened_at is claimed atomically (see
+        the UPDATE ... WHERE opened_at IS NULL below) so two concurrent
+        requests - or a pixel racing a click - can't both count as the
+        first open and double-increment the campaign total."""
         conn = _get_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM recipients WHERE tracking_token = ?", (token,))
+        cursor.execute("SELECT campaign_id, email FROM recipients WHERE tracking_token = ?", (token,))
         rec = _fetchone_dict(cursor)
         conn.close()
         if not rec:
             return False
         now = _utcnow_iso()
-        first_open = rec["status"] != "opened"
         with _db_lock:
             conn2 = _get_conn()
             c2 = conn2.cursor()
+            c2.execute(
+                "UPDATE recipients SET opened_at = ? WHERE tracking_token = ? AND opened_at IS NULL",
+                (now, token),
+            )
+            first_open = c2.rowcount == 1
+            # A late pixel hit only ever adds to the open evidence: it never
+            # touches click fields, and status only moves forward to 'opened'.
             c2.execute("""
                 UPDATE recipients
                 SET status            = 'opened',
                     open_count        = open_count + 1,
-                    opened_at         = COALESCE(opened_at, ?),
                     opened_device_type= COALESCE(opened_device_type, ?),
                     opened_os         = COALESCE(opened_os, ?),
                     opened_ip         = COALESCE(opened_ip, ?),
                     opened_ua         = COALESCE(opened_ua, ?)
                 WHERE tracking_token = ?
-            """, (now, device_type[:30], os_name[:30], ip[:64], user_agent[:300], token))
+            """, (device_type[:30], os_name[:30], ip[:64], user_agent[:300], token))
             c2.execute("""
                 INSERT INTO events (id, campaign_id, email, event_type, token, occurred_at)
                 VALUES (?, ?, ?, 'open', ?, ?)
@@ -796,33 +823,49 @@ class PhishingCampaignService:
 
     def mark_clicked(self, token: str, *, ip: str = "", user_agent: str = "",
                      device_type: str = "", os_name: str = "") -> bool:
+        """Record a link click. Invariant: CLICKED => OPENED. A click is
+        stronger evidence of interaction than a tracking-pixel hit (the pixel
+        can be blocked, proxied or cached), so if no open was ever observed
+        the click promotes the recipient to opened: opened_at is set to the
+        click time and status becomes 'opened'. open_count is NOT bumped for
+        that inferred open - it stays a count of real pixel hits, so
+        opened_at set with open_count = 0 means "opened, inferred from a
+        click". Both first-open and first-click are claimed atomically."""
         conn = _get_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM recipients WHERE tracking_token = ?", (token,))
+        cursor.execute("SELECT campaign_id, email FROM recipients WHERE tracking_token = ?", (token,))
         rec = _fetchone_dict(cursor)
         conn.close()
         if not rec:
             return False
         now = _utcnow_iso()
-        first_click = (rec.get("click_count") or 0) == 0
         with _db_lock:
             conn2 = _get_conn()
             c2 = conn2.cursor()
-            # Deliberately does NOT touch status/opened_at/open_count/
-            # opened_* - a click is a distinct event from an email-open
-            # tracking-pixel hit and must never be treated as one, even
-            # though in practice a click almost always implies the email
-            # was seen. Those fields are owned exclusively by mark_opened().
+            c2.execute(
+                "UPDATE recipients SET clicked_at = ? WHERE tracking_token = ? AND clicked_at IS NULL",
+                (now, token),
+            )
+            first_click = c2.rowcount == 1
+            c2.execute(
+                "UPDATE recipients SET opened_at = ? WHERE tracking_token = ? AND opened_at IS NULL",
+                (now, token),
+            )
+            inferred_open = c2.rowcount == 1
             c2.execute("""
                 UPDATE recipients
-                SET click_count        = click_count + 1,
-                    clicked_at         = COALESCE(clicked_at, ?),
+                SET status             = 'opened',
+                    click_count        = click_count + 1,
                     clicked_device_type= COALESCE(clicked_device_type, ?),
                     clicked_os         = COALESCE(clicked_os, ?),
                     clicked_ip         = COALESCE(clicked_ip, ?),
-                    clicked_ua         = COALESCE(clicked_ua, ?)
+                    clicked_ua         = COALESCE(clicked_ua, ?),
+                    opened_device_type = COALESCE(opened_device_type, ?),
+                    opened_os          = COALESCE(opened_os, ?),
+                    opened_ip          = COALESCE(opened_ip, ?),
+                    opened_ua          = COALESCE(opened_ua, ?)
                 WHERE tracking_token = ?
-            """, (now,
+            """, (device_type[:30], os_name[:30], ip[:64], user_agent[:300],
                   device_type[:30], os_name[:30], ip[:64], user_agent[:300],
                   token))
             c2.execute("""
@@ -831,8 +874,12 @@ class PhishingCampaignService:
             """, (str(uuid.uuid4()), rec["campaign_id"], rec["email"], token, now))
             conn2.commit()
             conn2.close()
-        if first_click:
-            self.update_campaign_stats(rec["campaign_id"], clicked_delta=1)
+        if first_click or inferred_open:
+            self.update_campaign_stats(
+                rec["campaign_id"],
+                clicked_delta=1 if first_click else 0,
+                opened_delta=1 if inferred_open else 0,
+            )
         return True
 
     def get_redirect_url_for_token(self, token: str) -> str:

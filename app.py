@@ -2401,6 +2401,21 @@ def blog_post_detail(post_id):
 _ALLOWED_IMAGE_EXTS  = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'}
 _MAX_IMAGE_BYTES     = 5 * 1024 * 1024  # 5 MB
 
+
+def _image_signature_matches(ext: str, data: bytes) -> bool:
+    """Check the leading bytes match the claimed image type."""
+    if ext in ('.jpg', '.jpeg'):
+        return data[:3] == b'\xff\xd8\xff'
+    if ext == '.png':
+        return data[:8] == b'\x89PNG\r\n\x1a\n'
+    if ext == '.gif':
+        return data[:4] == b'GIF8'
+    if ext == '.webp':
+        return data[:4] == b'RIFF' and data[8:12] == b'WEBP'
+    if ext == '.svg':
+        return b'<svg' in data[:2048].lower()
+    return False
+
 @app.route("/api/phish/upload/image", methods=["POST", "OPTIONS"])
 def upload_image():
     if request.method == "OPTIONS":
@@ -2425,10 +2440,23 @@ def upload_image():
     data = file.read()
     if len(data) > _MAX_IMAGE_BYTES:
         return _json_response({'error': 'File exceeds 5 MB limit'}, 400)
+    if not data:
+        return _json_response({'error': 'The uploaded file is empty'}, 400)
+    # Trust the file's actual bytes, not just the extension the browser sent.
+    if not _image_signature_matches(ext, data):
+        return _json_response({'error': f'File content does not look like a valid {ext} image'}, 400)
 
     filename  = f"{uuid.uuid4().hex}{ext}"
     dest      = _UPLOADS_DIR / filename
-    dest.write_bytes(data)
+    try:
+        _UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    except OSError as exc:
+        # Almost always a permissions problem on the uploads directory (the
+        # service user must be able to write there). Surface it as JSON the
+        # UI can show, instead of an opaque HTML 500 / "Failed to fetch".
+        logging.error(f"Image upload could not write {dest}: {exc}", exc_info=True)
+        return _json_response({'error': f'Server could not save the image ({exc.strerror or "write failed"})'}, 500)
 
     # Absolute URL, not relative - a relative /static/uploads/... path only
     # resolves for the SMTP send path (_embed_images rewrites it to a cid:
@@ -2988,7 +3016,14 @@ def auth_login():
     email = (body.get("email") or "").strip()
     password = body.get("password") or ""
     if not email or not password:
-        return _json_response({"error": "Email/username and password are required"}, 400)
+        return _json_response({"error": "Email and password are required"}, 400)
+
+    # Email is case-insensitive (find_by_email lowercases, and every stored
+    # email is lowercased at write time). The only non-email login id is the
+    # seeded super-admin username, which - unlike emails - is matched
+    # case-sensitively, exactly as configured.
+    if "@" not in email and email != os.environ.get("SUPER_ADMIN_USERNAME", "Workmate123"):
+        return _json_response({"error": "Invalid email or password"}, 401)
 
     svc = AuthService()
     user = svc.find_by_email(email)

@@ -263,6 +263,17 @@ def _init_db():
 
             for idx in index_statements:
                 cursor.execute(idx)
+            # Case-insensitive uniqueness enforced by the database itself, not
+            # just by callers remembering to lowercase (auth_service does, but
+            # a future writer might not). Only created when no existing rows
+            # collide - a failed CREATE UNIQUE INDEX would abort this whole
+            # init transaction on Postgres, so collisions are logged instead
+            # of attempted (resolve them by hand, then restart).
+            cursor.execute("SELECT LOWER(email) FROM users GROUP BY LOWER(email) HAVING COUNT(*) > 1")
+            if cursor.fetchall():
+                logging.error("users has emails differing only by case - skipping UX_users_email_lower; resolve duplicates first")
+            else:
+                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS UX_users_email_lower ON users (LOWER(email))")
             # Seed the single settings row if absent.
             cursor.execute("SELECT COUNT(*) FROM tenant_settings WHERE id = 1")
             if cursor.fetchone()[0] == 0:
