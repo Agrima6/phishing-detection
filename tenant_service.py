@@ -16,7 +16,10 @@ from datetime import datetime, timezone
 
 from config import config
 from default_templates import build_default_templates
-from phishing_campaign_service import _get_conn, _fetchone_dict, _fetchall_dict, _table_columns, _using_postgres, mask_phone
+from phishing_campaign_service import (
+    _get_conn, _fetchone_dict, _fetchall_dict, _table_columns, _using_postgres, mask_phone,
+    _ensure_db_ready as _ensure_campaign_db_ready,
+)
 
 _db_lock = threading.Lock()
 _db_initialized = False
@@ -1076,12 +1079,17 @@ class TenantService:
     # ------------------------------------------------------------------
 
     def list_tenants(self) -> list[dict]:
+        # The campaign/run tables belong to phishing_campaign_service; make
+        # sure they exist rather than relying on something else having
+        # initialised them earlier in this process.
+        _ensure_campaign_db_ready()
         conn = _get_conn()
         cursor = conn.cursor()
         cursor.execute("""
             SELECT t.*,
                    (SELECT COUNT(*) FROM employees e WHERE e.tenant_id = t.id) AS employee_count,
-                   (SELECT COUNT(*) FROM campaigns c WHERE c.tenant_id = t.id) AS campaign_count
+                   (SELECT COUNT(*) FROM campaign_runs cr WHERE cr.tenant_id = t.id) AS campaign_count,
+                   (SELECT MAX(cr.first_sent_at) FROM campaign_runs cr WHERE cr.tenant_id = t.id) AS last_campaign_at
             FROM tenants t
             ORDER BY t.created_at DESC
         """)
@@ -1144,6 +1152,7 @@ class TenantService:
     def delete_tenant(self, tenant_id: str) -> bool:
         """Deletes the tenant registry row and all of its scoped data
         (employees, templates, campaigns/recipients/events, audit logs)."""
+        _ensure_campaign_db_ready()
         with _db_lock:
             conn = _get_conn()
             cursor = conn.cursor()
@@ -1153,6 +1162,9 @@ class TenantService:
                 cursor.execute("DELETE FROM events WHERE campaign_id = ?", (cid,))
                 cursor.execute("DELETE FROM recipients WHERE campaign_id = ?", (cid,))
             cursor.execute("DELETE FROM campaigns WHERE tenant_id = ?", (tenant_id,))
+            # Deleting the whole company removes its run history too; only
+            # deleting an individual campaign leaves the ledger intact.
+            cursor.execute("DELETE FROM campaign_runs WHERE tenant_id = ?", (tenant_id,))
             cursor.execute("DELETE FROM employees WHERE tenant_id = ?", (tenant_id,))
             cursor.execute("DELETE FROM templates WHERE tenant_id = ? AND is_global = 0", (tenant_id,))
             cursor.execute("DELETE FROM audit_logs WHERE tenant_id = ?", (tenant_id,))

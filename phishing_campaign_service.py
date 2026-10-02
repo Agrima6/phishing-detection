@@ -243,6 +243,14 @@ def _init_db():
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS campaign_runs (
+            campaign_id   TEXT NOT NULL PRIMARY KEY,
+            tenant_id     TEXT NOT NULL DEFAULT 'default',
+            campaign_name TEXT NOT NULL DEFAULT '',
+            first_sent_at TEXT NOT NULL
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS send_jobs (
             campaign_id    TEXT NOT NULL PRIMARY KEY,
             state          TEXT NOT NULL,
@@ -266,6 +274,7 @@ def _init_db():
         "CREATE INDEX IF NOT EXISTS IX_events_campaign_id ON events (campaign_id)",
         "CREATE INDEX IF NOT EXISTS IX_events_token ON events (token)",
         "CREATE INDEX IF NOT EXISTS IX_events_campaign_type ON events (campaign_id, event_type)",
+        "CREATE INDEX IF NOT EXISTS IX_campaign_runs_tenant_id ON campaign_runs (tenant_id)",
     ]
 
     # Online schema upgrades for recipient device metadata (idempotent).
@@ -319,6 +328,20 @@ def _init_db():
                 cursor.execute("ALTER TABLE recipients ADD COLUMN phone TEXT")
             for idx in index_statements:
                 cursor.execute(idx)
+            # Backfill the permanent run ledger from campaigns that already
+            # sent something, so existing companies start with a correct
+            # lifetime count. Idempotent (ON CONFLICT DO NOTHING). Campaigns
+            # deleted before this ledger existed left no trace here and can't
+            # be recovered from this table.
+            cursor.execute("""
+                INSERT INTO campaign_runs (campaign_id, tenant_id, campaign_name, first_sent_at)
+                SELECT c.id, c.tenant_id, c.name, MIN(r.sent_at)
+                FROM campaigns c
+                JOIN recipients r ON r.campaign_id = c.id
+                WHERE r.sent_at IS NOT NULL
+                GROUP BY c.id, c.tenant_id, c.name
+                ON CONFLICT (campaign_id) DO NOTHING
+            """)
             # Idempotent invariant repair (CLICKED => OPENED): recipients
             # that clicked without an observed pixel hit - including every row
             # from before mark_clicked promoted opens - get opened_at set to
@@ -963,6 +986,17 @@ class PhishingCampaignService:
                 SET status = 'sent', sent_at = ?, send_count = send_count + 1
                 WHERE campaign_id = ? AND email = ?
             """, (now, campaign_id, email_lower))
+            # A campaign has "run" once its first email is actually sent -
+            # not when it's merely created or launch is attempted (a launch
+            # where every send fails shouldn't count). This row is never
+            # deleted with the campaign, so usage can't be lowered by
+            # deleting campaigns afterwards. One row per campaign: resends
+            # and later sends are no-ops.
+            c2.execute("""
+                INSERT INTO campaign_runs (campaign_id, tenant_id, campaign_name, first_sent_at)
+                SELECT id, tenant_id, name, ? FROM campaigns WHERE id = ?
+                ON CONFLICT (campaign_id) DO NOTHING
+            """, (now, campaign_id))
             conn2.commit()
             conn2.close()
         self.update_campaign_stats(
