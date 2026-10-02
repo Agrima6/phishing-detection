@@ -47,6 +47,7 @@ from gemini_service import (
     GeminiConfigError,
 )
 
+import geoip
 from config import config
 from phishing_campaign_service import (
     PhishingCampaignService, mask_phone, get_send_job, start_send_job, update_send_job,
@@ -1720,19 +1721,10 @@ def _is_ms_scanner_ip(ip: str) -> bool:
     return any(ip.startswith(p) for p in _MS_SCANNER_IP_PREFIXES)
 
 
-# Google's published IP range for its crawlers/proxies, including the
-# GoogleImageProxy service Gmail uses to fetch every remote image (tracking
-# pixels included) on a recipient's behalf - see
-# https://developers.google.com/search/apis/ipranges/googlebot.json
-_GOOGLE_PROXY_IP_PREFIXES = ("66.249.",)
-_GOOGLE_IMAGE_PROXY_UA_RE = re.compile(r"googleimageproxy|gmailimageproxy", re.IGNORECASE)
-
-
-def _is_google_image_proxy(ip: str, ua: str) -> bool:
-    """True only for requests that are BOTH from Google's own IP range AND
-    self-identify as its image proxy - not just an IP match (Google's crawler
-    IPs are shared infra) and not just a UA match (spoofable by anyone)."""
-    return ip.startswith(_GOOGLE_PROXY_IP_PREFIXES) and bool(_GOOGLE_IMAGE_PROXY_UA_RE.search(ua))
+# Google's GoogleImageProxy (what Gmail fetches every image through, tracking
+# pixels included) - the rule lives in geoip.py so the bot allowlist here and
+# the location enrichment there can never disagree about what counts as it.
+_is_google_image_proxy = geoip.is_google_image_proxy
 
 
 def _is_bot_request() -> tuple[bool, str]:

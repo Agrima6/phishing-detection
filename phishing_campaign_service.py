@@ -25,6 +25,7 @@ try:
 except ImportError:
     psycopg2 = None
 
+import geoip
 from config import config
 
 # ---------------------------------------------------------------------------
@@ -272,6 +273,8 @@ def _init_db():
     device_columns = [
         "opened_device_type", "opened_os", "opened_ip", "opened_ua",
         "clicked_device_type", "clicked_os", "clicked_ip", "clicked_ua",
+        # JSON blobs from geoip.lookup() - approximate location/ISP/hostname.
+        "opened_geo", "clicked_geo",
     ]
 
     with _db_lock:
@@ -819,7 +822,50 @@ class PhishingCampaignService:
             conn2.close()
         if first_open:
             self.update_campaign_stats(rec["campaign_id"], opened_delta=1)
+            self._enrich_geo_async(token, "opened", ip, user_agent)
         return True
+
+    def _enrich_geo_async(self, token: str, kind: str, ip: str, user_agent: str) -> None:
+        """Look up the event IP's approximate location/ISP/hostname off the
+        request path (a click must redirect immediately, never wait on a
+        third-party lookup) and store it beside the event's other details.
+
+        Only called for the FIRST open / click, matching opened_ip/clicked_ip
+        which also keep their first value - the location always describes
+        the same request the IP does. `kind` is an internal constant, never
+        user input, so it's safe to interpolate as a column prefix."""
+        if not geoip.enabled() or not ip:
+            return
+
+        def _run():
+            geo = geoip.lookup(ip, user_agent)
+            if not geo:
+                return
+            blob = json.dumps(geo)
+            try:
+                with _db_lock:
+                    conn = _get_conn()
+                    try:
+                        c = conn.cursor()
+                        c.execute(
+                            f"UPDATE recipients SET {kind}_geo = ? WHERE tracking_token = ? AND {kind}_geo IS NULL",
+                            (blob, token),
+                        )
+                        if kind == "clicked":
+                            # mark_clicked copies the click's network details onto an
+                            # open it inferred; give that open the same location.
+                            c.execute(
+                                "UPDATE recipients SET opened_geo = ? "
+                                "WHERE tracking_token = ? AND opened_geo IS NULL AND opened_ip = ?",
+                                (blob, token, ip[:64]),
+                            )
+                        conn.commit()
+                    finally:
+                        conn.close()
+            except Exception as exc:
+                logging.warning(f"Could not store GeoIP details: {exc.__class__.__name__}")
+
+        threading.Thread(target=_run, daemon=True, name="geoip-enrich").start()
 
     def mark_clicked(self, token: str, *, ip: str = "", user_agent: str = "",
                      device_type: str = "", os_name: str = "") -> bool:
@@ -880,6 +926,8 @@ class PhishingCampaignService:
                 clicked_delta=1 if first_click else 0,
                 opened_delta=1 if inferred_open else 0,
             )
+        if first_click:
+            self._enrich_geo_async(token, "clicked", ip, user_agent)
         return True
 
     def get_redirect_url_for_token(self, token: str) -> str:

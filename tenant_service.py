@@ -577,6 +577,10 @@ class TenantService:
     # ------------------------------------------------------------------
 
     def list_employees(self) -> list[dict]:
+        # A recipient only counts toward an employee's risk if its campaign
+        # belongs to the SAME org. recipients has no tenant_id of its own, so
+        # joining on email alone made one org's clicks inflate the same
+        # address's risk in every other org that happened to have that email.
         conn = _get_conn()
         cursor = conn.cursor()
         cursor.execute("""
@@ -584,7 +588,11 @@ class TenantService:
                    COUNT(r.id) AS total_simulations,
                    SUM(CASE WHEN r.click_count > 0 THEN 1 ELSE 0 END) AS hits_count
             FROM employees e
-            LEFT JOIN recipients r ON r.email = e.email
+            LEFT JOIN (
+                SELECT rr.id, rr.email, rr.click_count, cc.tenant_id
+                FROM recipients rr
+                JOIN campaigns cc ON cc.id = rr.campaign_id
+            ) r ON r.email = e.email AND r.tenant_id = e.tenant_id
             WHERE e.tenant_id = ?
             GROUP BY e.id
             ORDER BY e.created_at DESC
@@ -1012,7 +1020,11 @@ class TenantService:
                    COUNT(r.id) AS total_recipients,
                    SUM(CASE WHEN r.click_count > 0 THEN 1 ELSE 0 END) AS clicked_count
             FROM employees e
-            JOIN recipients r ON r.email = e.email
+            JOIN (
+                SELECT rr.id, rr.email, rr.click_count, cc.tenant_id
+                FROM recipients rr
+                JOIN campaigns cc ON cc.id = rr.campaign_id
+            ) r ON r.email = e.email AND r.tenant_id = e.tenant_id
             WHERE e.department != '' AND e.tenant_id = ?
             GROUP BY e.department
             ORDER BY clicked_count DESC
