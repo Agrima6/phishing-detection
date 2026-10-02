@@ -3186,10 +3186,24 @@ def public_onboarding_logo(token):
     data = file.read()
     if len(data) > _MAX_IMAGE_BYTES:
         return _json_response({"error": "File exceeds 5 MB limit"}, 400)
+    if not data:
+        return _json_response({"error": "The uploaded file is empty"}, 400)
+    # This route needs no login (only a valid onboarding token), so it gets the
+    # same real-content check as the authenticated upload, not just the extension.
+    if not _image_signature_matches(ext, data):
+        return _json_response({"error": f"File content does not look like a valid {ext} image"}, 400)
 
     filename = f"{uuid.uuid4().hex}{ext}"
-    (_UPLOADS_DIR / filename).write_bytes(data)
-    return _json_response({"url": f"/static/uploads/{filename}"})
+    try:
+        _UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        (_UPLOADS_DIR / filename).write_bytes(data)
+    except OSError as exc:
+        logging.error(f"Onboarding logo could not be written: {exc}", exc_info=True)
+        return _json_response({"error": f'Server could not save the logo ({exc.strerror or "write failed"})'}, 500)
+    # Absolute, like upload_image: a bare /static/uploads/... path resolves
+    # against whichever site renders it, and the dashboard's own origin
+    # doesn't serve that folder, so the logo showed as a broken image.
+    return _json_response({"url": f"{config.PHISHING_BASE_URL.rstrip('/')}/static/uploads/{filename}"})
 
 
 @app.route("/api/admin/registrations", methods=["GET", "OPTIONS"])
