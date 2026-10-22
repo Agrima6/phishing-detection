@@ -960,8 +960,9 @@ def _dispatch_single_email(svc: PhishingCampaignService, campaign: dict, recipie
             f"&r={_urlencode(redirect_url, safe='')}"
         )
     else:
-        # Short clean URL – hides the tracking path from hover tooltip
-        click_track_url = f"{base_url}/auth/verify/{recipient['tracking_token']}"
+        # Clean short URL that records the click and then 302-redirects
+        # straight to the campaign's Step-4 redirect URL (no interstitial).
+        click_track_url = f"{base_url}/r/{recipient['tracking_token']}"
 
     body_html = campaign["body_html"]
     first_name = _first_name(recipient.get("name", recipient["email"]))
@@ -1873,6 +1874,7 @@ def track_open(token):
 # ---------------------------------------------------------------------------
 
 @app.route("/api/track/click/<token>", methods=["GET", "HEAD"])
+@app.route("/r/<token>", methods=["GET", "HEAD"])
 def track_click(token):
     fallback_url = "https://www.microsoft.com"
     if not re.match(r'^[A-Za-z0-9_\-]{10,60}$', token):
@@ -1908,7 +1910,6 @@ def track_click(token):
 # Short redirect URL – clean URL for email button hover tooltip
 # ---------------------------------------------------------------------------
 
-@app.route("/r/<token>", methods=["GET"])
 @app.route("/auth/verify/<token>", methods=["GET"])
 def short_redirect(token):
     """Short clean URL that hides the tracking path from email hover tooltip.
