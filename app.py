@@ -2012,15 +2012,54 @@ _PHISH_BRANDS = {
 }
 
 
+def _generic_brand(url: str, host: str) -> dict:
+    """A neutral sign-in skin built from whatever domain the campaign points
+    at, used for any destination that isn't one of the well-known brands
+    above (e.g. a company's own portal like wcspl.net). This stops custom
+    domains from being dressed up as - and redirected to - Microsoft."""
+    display_host = host[4:] if host.startswith("www.") else host
+    label = (display_host.split(".")[0].replace("-", " ").title()
+             if display_host else "Secure Portal")
+    initial = escape((label[:1] or "S").upper())
+    return {
+        "title": f"Sign in - {label}",
+        "bg": "#f4f6f8",
+        "radius": "10px",
+        "btn_radius": "6px",
+        "accent": "#2563eb",
+        "accent_hover": "#1d4ed8",
+        "heading": "Sign in",
+        "subtitle": f"Use your {label} account",
+        "brand_name": label,
+        "real_url": display_host or url,
+        "support_url": url,
+        # Fallback is the destination itself, so even the JS fallback path
+        # lands on the entered URL rather than a Microsoft page.
+        "fallback_url": url,
+        "logo_svg": (
+            '<svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">'
+            '<rect width="48" height="48" rx="12" fill="#2563eb"/>'
+            f'<text x="24" y="31" font-family="Arial, sans-serif" font-size="22" '
+            f'font-weight="700" fill="#ffffff" text-anchor="middle">{initial}</text>'
+            '</svg>'
+        ),
+    }
+
+
 def _brand_for_url(url: str) -> dict:
     host = (urlparse(url).hostname or "").lower()
-    if "google" in host:
+    if "google" in host or "gmail" in host:
         return _PHISH_BRANDS["google"]
     if "zoom.us" in host:
         return _PHISH_BRANDS["zoom"]
     if "workday" in host:
         return _PHISH_BRANDS["workday"]
-    return _PHISH_BRANDS["microsoft"]
+    if (not host or "microsoft" in host or "office" in host or "live.com" in host
+            or "outlook" in host or "sharepoint" in host or "onedrive" in host
+            or "azure" in host):
+        return _PHISH_BRANDS["microsoft"]
+    # Any other destination: brand the page from the entered domain itself.
+    return _generic_brand(url, host)
 
 
 # ---------------------------------------------------------------------------
