@@ -202,6 +202,7 @@ def _init_db():
             body_html        TEXT    NOT NULL,
             sender_name      TEXT    NOT NULL DEFAULT 'Security Team',
             redirect_url     TEXT    NOT NULL DEFAULT '',
+            training_url     TEXT    NOT NULL DEFAULT '',
             status           TEXT    NOT NULL DEFAULT 'draft',
             created_at       TEXT    NOT NULL,
             updated_at       TEXT    NOT NULL,
@@ -323,6 +324,8 @@ def _init_db():
                 cursor.execute("ALTER TABLE campaigns ADD COLUMN whatsapp_config_id TEXT")
             if "message_body" not in existing_campaign_cols:
                 cursor.execute("ALTER TABLE campaigns ADD COLUMN message_body TEXT")
+            if "training_url" not in existing_campaign_cols:
+                cursor.execute("ALTER TABLE campaigns ADD COLUMN training_url TEXT NOT NULL DEFAULT ''")
             existing_recipient_cols = _table_columns(cursor, "recipients")
             if "phone" not in existing_recipient_cols:
                 cursor.execute("ALTER TABLE recipients ADD COLUMN phone TEXT")
@@ -472,7 +475,8 @@ class PhishingCampaignService:
                         email_config_id: str | None = None,
                         channel: str = "email",
                         whatsapp_config_id: str | None = None,
-                        message_body: str | None = None) -> dict:
+                        message_body: str | None = None,
+                        training_url: str = "") -> dict:
         campaign_id = str(uuid.uuid4())
         now = _utcnow_iso()
         row = {
@@ -480,7 +484,7 @@ class PhishingCampaignService:
             "body_html": body_html, "sender_name": sender_name,
             "redirect_url": redirect_url, "email_config_id": email_config_id,
             "channel": channel or "email", "whatsapp_config_id": whatsapp_config_id,
-            "message_body": message_body,
+            "message_body": message_body, "training_url": training_url or "",
             "status": "draft", "created_at": now, "updated_at": now,
             "total_sent": 0, "total_opened": 0, "total_clicked": 0,
             "total_failed": 0, "total_duplicates": 0, "tenant_id": self.tenant_id,
@@ -491,13 +495,13 @@ class PhishingCampaignService:
             cursor.execute("""
                 INSERT INTO campaigns
                   (id, name, subject, body_html, sender_name, redirect_url, email_config_id,
-                   channel, whatsapp_config_id, message_body, status,
+                   channel, whatsapp_config_id, message_body, training_url, status,
                    created_at, updated_at, total_sent, total_opened, total_clicked,
                    total_failed, total_duplicates, tenant_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (row["id"], row["name"], row["subject"], row["body_html"],
                   row["sender_name"], row["redirect_url"], row["email_config_id"],
-                  row["channel"], row["whatsapp_config_id"], row["message_body"], row["status"],
+                  row["channel"], row["whatsapp_config_id"], row["message_body"], row["training_url"], row["status"],
                   row["created_at"], row["updated_at"], 0, 0, 0, 0, 0, self.tenant_id))
             conn.commit()
             conn.close()
@@ -964,6 +968,23 @@ class PhishingCampaignService:
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else ""
+
+    def get_campaign_context_for_token(self, token: str) -> dict:
+        """Landing-page context for a recipient token (looked up globally,
+        across tenants, since the landing page is public): the campaign's
+        redirect URL, owning tenant, and optional training resource link."""
+        conn = _get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT c.redirect_url, c.tenant_id, c.training_url FROM recipients r
+            JOIN campaigns c ON r.campaign_id = c.id
+            WHERE r.tracking_token = ?
+        """, (token,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return {}
+        return {"redirect_url": row[0] or "", "tenant_id": row[1] or "default", "training_url": row[2] or ""}
 
     def mark_sent(self, campaign_id: str, email: str):
         now = _utcnow_iso()

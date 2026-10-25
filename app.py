@@ -1220,6 +1220,7 @@ def campaigns():
             return _json_response({"error": "channel must be 'email' or 'whatsapp'"}, 400)
         sender_name = (body.get("sender_name") or "Security Team").strip()
         redirect_url = (body.get("redirect_url") or "").strip()
+        training_url = (body.get("training_url") or "").strip()
         email_config_id = (body.get("email_config_id") or "").strip() or None
         whatsapp_config_id = (body.get("whatsapp_config_id") or "").strip() or None
 
@@ -1230,6 +1231,7 @@ def campaigns():
             campaign = svc.create_campaign(
                 name, subject="", body_html="", sender_name=sender_name, redirect_url=redirect_url,
                 channel="whatsapp", whatsapp_config_id=whatsapp_config_id, message_body=message_body,
+                training_url=training_url,
             )
         else:
             subject = (body.get("subject") or "").strip()
@@ -1243,7 +1245,7 @@ def campaigns():
             header_image_url = (body.get("header_image_url") or "").strip()
             body_html = _inject_header_image(body_html, header_image_url)
             campaign = svc.create_campaign(name, subject, body_html, sender_name, redirect_url, email_config_id,
-                                           channel="email")
+                                           channel="email", training_url=training_url)
         _log_audit("CAMPAIGN", f"Campaign \"{name}\" created")
         return _json_response(campaign, 201)
     except Exception as exc:
@@ -2063,6 +2065,48 @@ def _brand_for_url(url: str) -> dict:
     return _generic_brand(url, host)
 
 
+def _company_brand(tenant_id: str, redirect_to: str) -> dict | None:
+    """Skin the simulated sign-in page as the recipient's own company, using
+    the tenant's name, logo and primary colour from their settings. Returns
+    None for the default/system tenant so the caller falls back to a brand."""
+    if not tenant_id or tenant_id == "default":
+        return None
+    try:
+        raw = TenantService(tenant_id=tenant_id).get_settings_raw()
+    except Exception:
+        return None
+    name = (raw.get("name") or "").strip()
+    if not name:
+        return None
+    color = (raw.get("primary_color") or "#7a1220").strip() or "#7a1220"
+    logo_url = (raw.get("logo_url") or "").strip()
+    if logo_url and not logo_url.startswith("http"):
+        base = config.get_phishing_config()["base_url"].rstrip("/")
+        logo_url = f"{base}{logo_url}"
+    if logo_url:
+        logo_html = f'<img src="{escape(logo_url)}" alt="" style="max-height:52px;max-width:200px;object-fit:contain;" />'
+    else:
+        initial = escape((name[:1] or "C").upper())
+        logo_html = (
+            '<svg width="52" height="52" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">'
+            f'<rect width="48" height="48" rx="12" fill="{escape(color)}"/>'
+            f'<text x="24" y="31" font-family="Arial, sans-serif" font-size="22" font-weight="700" '
+            f'fill="#ffffff" text-anchor="middle">{initial}</text></svg>'
+        )
+    return {
+        "title": f"Sign in to {name}",
+        "bg": "#f3f4f6", "radius": "10px", "btn_radius": "6px",
+        "accent": color, "accent_hover": color,
+        "heading": "Sign in", "subtitle": f"Use your {name} account",
+        "brand_name": name,
+        "real_url": (urlparse(redirect_to).hostname or name),
+        "support_url": redirect_to or "#",
+        "fallback_url": redirect_to or "https://www.google.com",
+        "logo_svg": "",
+        "logo_html": logo_html,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Built-in phishing landing page
 # ---------------------------------------------------------------------------
@@ -2082,14 +2126,18 @@ def phishing_landing(token):
          click only bumps `click_count`, which is the desired behaviour.
     """
     redirect_to = "https://login.microsoftonline.com"
+    campaign_tenant_id = "default"
+    training_url = ""
     valid_token = bool(re.match(r'^[A-Za-z0-9_\-]{10,60}$', token))
     if valid_token:
         _log_tracking_hit("landing-render", token)
         try:
             svc = PhishingCampaignService(tenant_id=_get_tenant_id())
-            url = svc.get_redirect_url_for_token(token)
-            if url:
-                redirect_to = url
+            ctx = svc.get_campaign_context_for_token(token)
+            if ctx:
+                redirect_to = ctx.get("redirect_url") or redirect_to
+                campaign_tenant_id = ctx.get("tenant_id") or "default"
+                training_url = ctx.get("training_url") or ""
             # Server-side click fallback – only when this is clearly a real
             # browser (passes bot filter) AND the time window says it can't
             # be an automated scanner pre-fetch.
@@ -2118,10 +2166,14 @@ def phishing_landing(token):
     html_path = Path(__file__).parent / "landing_page" / "index.html"
     if not html_path.exists():
         return Response(status=302, headers={"Location": redirect_to, "Cache-Control": "no-store, no-cache"})
-    brand = _brand_for_url(redirect_to)
+    # Brand the simulated sign-in page as the recipient's own company when the
+    # campaign belongs to a real tenant, so it looks like their portal; fall
+    # back to the redirect URL's brand otherwise.
+    brand = _company_brand(campaign_tenant_id, redirect_to) or _brand_for_url(redirect_to)
     html = html_path.read_text(encoding="utf-8")
     html = html.replace("'__REDIRECT_URL__'", f"'{_js_escape(redirect_to)}'")
     html = html.replace("'__ORG_NAME__'", f"'{config.ORG_NAME}'")
+    html = html.replace("'__TRAINING_URL__'", f"'{_js_escape(training_url)}'")
     html = html.replace("'__BRAND_FALLBACK_URL__'", f"'{_js_escape(brand['fallback_url'])}'")
     html = html.replace("__BRAND_TITLE__", escape(brand["title"]))
     html = html.replace("__BRAND_BG__", brand["bg"])
@@ -2134,7 +2186,7 @@ def phishing_landing(token):
     html = html.replace("__BRAND_NAME__", escape(brand["brand_name"]))
     html = html.replace("__BRAND_REAL_URL__", escape(brand["real_url"]))
     html = html.replace("__BRAND_SUPPORT_URL__", brand["support_url"])
-    html = html.replace("__BRAND_LOGO_SVG__", brand["logo_svg"])
+    html = html.replace("__BRAND_LOGO_SVG__", brand.get("logo_html") or brand.get("logo_svg", ""))
     # Inject the tracking token so the page's JS can call /api/track/ping/<token>
     # only after observing a real user-interaction event.
     safe_token = token if valid_token else ""

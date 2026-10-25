@@ -149,6 +149,7 @@
       <li>Report suspicious emails to your IT Security team immediately.</li>
     </ul>
   </div>
+  <div class="training-block" id="trainingBlock" style="display:none;width:100%;max-width:560px;margin:4px auto 18px;"></div>
   <button class="warning-btn" id="warningOkBtn">I Understand — Take Me to the Real Sign-in</button>
   <div class="warning-sub" id="redirectNote"></div>
 </div>
@@ -227,6 +228,7 @@
   const _redirect = '__REDIRECT_URL__';
   const _orgName  = '__ORG_NAME__';
   const _fallback = '__BRAND_FALLBACK_URL__';
+  const _training = '__TRAINING_URL__';
 
   /* ---- Step 1: email ---- */
   document.getElementById('step1Form').addEventListener('submit', function(e) {
@@ -279,6 +281,23 @@
       if (_redirect && _redirect !== '__REDIRECT_URL__') {
         document.getElementById('redirectNote').textContent =
           'You will be redirected to ' + _redirect + ' in a moment.';
+      }
+      // Optional training resource (video or link) configured for this campaign.
+      if (_training && _training !== '__TRAINING_URL__') {
+        var tb = document.getElementById('trainingBlock');
+        var yt = _training.match(/(?:youtube\.com\/.*[?&]v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([A-Za-z0-9_\-]{6,})/);
+        if (yt) {
+          tb.innerHTML = '<div style="font-weight:600;margin-bottom:8px;color:#333;">Watch this short awareness video:</div>' +
+            '<div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:8px;">' +
+            '<iframe src="https://www.youtube.com/embed/' + yt[1] + '" title="Security awareness training" frameborder="0" ' +
+            'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen ' +
+            'style="position:absolute;top:0;left:0;width:100%;height:100%;"></iframe></div>';
+        } else {
+          tb.innerHTML = '<a href="' + _training + '" target="_blank" rel="noopener noreferrer" ' +
+            'style="display:inline-block;padding:11px 22px;background:#111827;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;">' +
+            'Open the awareness training &rarr;</a>';
+        }
+        tb.style.display = 'block';
       }
       document.getElementById('warningBanner').classList.add('show');
     }, 1500);
