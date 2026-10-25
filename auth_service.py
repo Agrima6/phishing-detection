@@ -305,6 +305,22 @@ class RegistrationService:
             conn.close()
         return self.get(registration_id), raw_token
 
+    def rename_by_tenant(self, tenant_id: str, new_name: str) -> None:
+        """Keep the registration row's company name in sync when a tenant
+        renames itself, and stamp when it changed - so the super-admin view
+        reflects the current name and shows that it was updated."""
+        if not tenant_id or not new_name:
+            return
+        with _db_lock:
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE registrations SET company_name = ?, name_updated_at = ? WHERE tenant_id = ?",
+                (new_name, _utcnow_iso(), tenant_id),
+            )
+            conn.commit()
+            conn.close()
+
     def resend_onboarding(self, registration_id: str) -> tuple[dict, str] | None:
         """Rotate the onboarding token for a registration that has not yet been
         submitted, so a fresh reminder link can be emailed (follow-up on a

@@ -129,7 +129,8 @@ def _init_db():
             tenant_id           TEXT    DEFAULT NULL,
             created_at          TEXT    NOT NULL,
             submitted_at        TEXT    DEFAULT NULL,
-            reviewed_at         TEXT    DEFAULT NULL
+            reviewed_at         TEXT    DEFAULT NULL,
+            name_updated_at     TEXT    DEFAULT NULL
         )
         """,
         """
@@ -263,6 +264,9 @@ def _init_db():
                 cursor.execute("ALTER TABLE tenants ADD COLUMN logo_url TEXT NOT NULL DEFAULT ''")
             if "email_configs" not in tenants_cols:
                 cursor.execute("ALTER TABLE tenants ADD COLUMN email_configs TEXT NOT NULL DEFAULT '[]'")
+            reg_cols = _table_columns(cursor, "registrations")
+            if "name_updated_at" not in reg_cols:
+                cursor.execute("ALTER TABLE registrations ADD COLUMN name_updated_at TEXT DEFAULT NULL")
 
             for idx in index_statements:
                 cursor.execute(idx)

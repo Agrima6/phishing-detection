@@ -2718,7 +2718,14 @@ def tenant_settings():
         if request.method == "GET":
             return _json_response(svc.to_frontend_shape())
         body = request.get_json(force=True, silent=True) or {}
+        old_name = svc.get_settings_raw().get("name")
         raw = svc.save_settings(body)
+        new_name = raw.get("name")
+        # If the company renamed itself, keep its registration row in sync so
+        # the super-admin console shows the current name + when it changed.
+        if svc.tenant_id != "default" and new_name and old_name and new_name != old_name:
+            RegistrationService().rename_by_tenant(svc.tenant_id, new_name)
+            _log_audit("TENANT", f"Company name changed from \"{old_name}\" to \"{new_name}\"")
         sso = body.get("sso_config") or {}
         if sso.get("client_id") or sso.get("client_secret"):
             _log_audit("SSO_CONFIG", "Microsoft Entra ID (OIDC) configuration updated")
@@ -2982,9 +2989,14 @@ def admin_tenant_detail(tenant_id):
             return _json_response({"error": "Company not found"}, 404)
         employees = TenantService(tenant_id=tenant_id).list_employees()
         registration = RegistrationService().get_by_tenant_id(tenant_id)
+        try:
+            activity = TenantService(tenant_id=tenant_id).list_audit_logs() or []
+        except Exception:
+            activity = []
         out = dict(tenant)
         out["employees"] = employees
         out["registration"] = registration
+        out["activity"] = activity[:25]
         return _json_response(out)
 
     if tenant_id == "default":
