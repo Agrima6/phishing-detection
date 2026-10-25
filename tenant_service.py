@@ -93,6 +93,7 @@ def _init_db():
             designation    TEXT    NOT NULL DEFAULT '',
             admin_email    TEXT    NOT NULL,
             primary_color  TEXT    NOT NULL DEFAULT '#7a1220',
+            tagline        TEXT    NOT NULL DEFAULT '',
             status         TEXT    NOT NULL DEFAULT 'active',
             created_at     TEXT    NOT NULL
         )
@@ -265,6 +266,11 @@ def _init_db():
                 cursor.execute("ALTER TABLE tenants ADD COLUMN logo_url TEXT NOT NULL DEFAULT ''")
             if "email_configs" not in tenants_cols:
                 cursor.execute("ALTER TABLE tenants ADD COLUMN email_configs TEXT NOT NULL DEFAULT '[]'")
+            if "tagline" not in tenants_cols:
+                cursor.execute("ALTER TABLE tenants ADD COLUMN tagline TEXT NOT NULL DEFAULT ''")
+            ts_cols = _table_columns(cursor, "tenant_settings")
+            if "tagline" not in ts_cols:
+                cursor.execute("ALTER TABLE tenant_settings ADD COLUMN tagline TEXT NOT NULL DEFAULT ''")
             reg_cols = _table_columns(cursor, "registrations")
             if "name_updated_at" not in reg_cols:
                 cursor.execute("ALTER TABLE registrations ADD COLUMN name_updated_at TEXT DEFAULT NULL")
@@ -876,6 +882,7 @@ class TenantService:
             "name": tenant["company_name"],
             "domains": [],
             "primary_color": tenant["primary_color"],
+            "tagline": tenant.get("tagline") or "",
             "logo_url": tenant.get("logo_url") or "",
             "sso_client_id": "",
             "sso_tenant_id": "",
@@ -895,6 +902,7 @@ class TenantService:
             branding = data.get("branding", {})
             primary_color = branding.get("primary_color", current["primary_color"])
             logo_url = branding.get("logo_url", current["logo_url"])
+            tagline = branding.get("tagline", current.get("tagline", ""))
             name = data.get("name", current["name"])
 
             incoming_configs = data.get("email_configs", current["email_configs"])
@@ -913,8 +921,8 @@ class TenantService:
                 conn = _get_conn()
                 cursor = conn.cursor()
                 cursor.execute(
-                    "UPDATE tenants SET company_name = ?, primary_color = ?, logo_url = ?, email_configs = ? WHERE id = ?",
-                    (name, primary_color, logo_url, json.dumps(merged_configs), self.tenant_id),
+                    "UPDATE tenants SET company_name = ?, primary_color = ?, tagline = ?, logo_url = ?, email_configs = ? WHERE id = ?",
+                    (name, primary_color, tagline, logo_url, json.dumps(merged_configs), self.tenant_id),
                 )
                 conn.commit()
                 conn.close()
@@ -925,6 +933,7 @@ class TenantService:
         branding = data.get("branding", {})
         primary_color = branding.get("primary_color", current["primary_color"])
         logo_url = branding.get("logo_url", current["logo_url"])
+        tagline = branding.get("tagline", current.get("tagline", ""))
 
         sso = data.get("sso_config", {})
         sso_client_id = sso.get("client_id", current["sso_client_id"])
@@ -961,11 +970,11 @@ class TenantService:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE tenant_settings
-                SET name = ?, domains = ?, primary_color = ?, logo_url = ?,
+                SET name = ?, domains = ?, primary_color = ?, tagline = ?, logo_url = ?,
                     sso_client_id = ?, sso_tenant_id = ?, sso_client_secret = ?,
                     email_configs = ?, whatsapp_configs = ?
                 WHERE id = 1
-            """, (name, json.dumps(domains), primary_color, logo_url,
+            """, (name, json.dumps(domains), primary_color, tagline, logo_url,
                   sso_client_id, sso_tenant_id, sso_client_secret,
                   json.dumps(merged_configs), json.dumps(merged_whatsapp)))
             conn.commit()
@@ -1008,6 +1017,7 @@ class TenantService:
             "branding": {
                 "primary_color": raw["primary_color"],
                 "logo_url": raw["logo_url"],
+                "tagline": raw.get("tagline") or "",
             },
             "sso_config": {
                 "client_id": raw["sso_client_id"],

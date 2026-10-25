@@ -2098,6 +2098,7 @@ def _company_brand(tenant_id: str, redirect_to: str) -> dict | None:
     if not name:
         return None
     color = (raw.get("primary_color") or "#7a1220").strip() or "#7a1220"
+    tagline = (raw.get("tagline") or "").strip() or "Build. Grow. Together."
     logo_url = (raw.get("logo_url") or "").strip()
     if logo_url and not logo_url.startswith("http"):
         base = config.get_phishing_config()["base_url"].rstrip("/")
@@ -2118,6 +2119,7 @@ def _company_brand(tenant_id: str, redirect_to: str) -> dict | None:
         "accent": color, "accent_hover": color,
         "heading": "Sign in", "subtitle": f"Use your {name} account",
         "brand_name": name,
+        "tagline": tagline,
         "real_url": (urlparse(redirect_to).hostname or name),
         "support_url": redirect_to or "#",
         "fallback_url": redirect_to or "https://www.google.com",
@@ -2206,6 +2208,7 @@ def phishing_landing(token):
     html = html.replace("__BRAND_REAL_URL__", escape(brand["real_url"]))
     html = html.replace("__BRAND_SUPPORT_URL__", brand["support_url"])
     html = html.replace("__BRAND_LOGO_SVG__", brand.get("logo_html") or brand.get("logo_svg", ""))
+    html = html.replace("__BRAND_TAGLINE__", escape(brand.get("tagline") or "Build. Grow. Together."))
     # Inject the tracking token so the page's JS can call /api/track/ping/<token>
     # only after observing a real user-interaction event.
     safe_token = token if valid_token else ""
