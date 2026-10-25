@@ -1255,11 +1255,28 @@ def campaigns():
         return _json_response({"error": f"Server error: {exc}"}, 500)
 
 
-@app.route("/api/phish/campaigns/<campaign_id>", methods=["GET", "DELETE", "OPTIONS"])
+@app.route("/api/phish/campaigns/<campaign_id>", methods=["GET", "DELETE", "PATCH", "PUT", "OPTIONS"])
 def campaign_detail(campaign_id):
     if request.method == "OPTIONS":
         return "", 200
     role = _get_role()
+    if request.method in ("PATCH", "PUT"):
+        if not _can(role, "create_campaign"):
+            return _unauthorized() if not role else _forbidden("edit_campaign")
+        body = request.get_json(force=True, silent=True) or {}
+        fields = {k: body[k] for k in ("name", "subject", "body_html", "sender_name",
+                                        "redirect_url", "training_url", "email_config_id") if k in body}
+        if "body_html" in fields:
+            fields["body_html"] = _inject_header_image(fields["body_html"], (body.get("header_image_url") or "").strip())
+        svc = PhishingCampaignService(tenant_id=_get_tenant_id())
+        try:
+            updated = svc.update_campaign(campaign_id, fields)
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
+        if not updated:
+            return _json_response({"error": "Campaign not found"}, 404)
+        _log_audit("CAMPAIGN", f"Campaign \"{updated.get('name', campaign_id)}\" updated")
+        return _json_response(updated)
     if request.method == "DELETE":
         if not _can(role, "create_campaign"):
             return _unauthorized() if not role else _forbidden("delete_campaign")

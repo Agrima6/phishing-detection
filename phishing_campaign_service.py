@@ -1174,7 +1174,40 @@ class PhishingCampaignService:
             "open_rate":        round(opened / sent * 100, 1) if sent > 0 else 0,
             "click_rate":       round(clicked / sent * 100, 1) if sent > 0 else 0,
             "created_at":       campaign["created_at"],
+            # Raw campaign content (for preview + draft editing).
+            "body_html":        campaign.get("body_html", ""),
+            "sender_name":      campaign.get("sender_name", ""),
+            "redirect_url":     campaign.get("redirect_url", ""),
+            "training_url":     campaign.get("training_url", ""),
+            "email_config_id":  campaign.get("email_config_id"),
         }
+
+    def update_campaign(self, campaign_id: str, fields: dict) -> dict | None:
+        """Update editable fields of a DRAFT campaign (content only, not stats).
+        Only whitelisted columns are touched, and only while status='draft'."""
+        campaign = self.get_campaign(campaign_id)
+        if not campaign:
+            return None
+        if campaign.get("status") != "draft":
+            raise ValueError("Only draft campaigns can be edited")
+        allowed = {"name", "subject", "body_html", "sender_name", "redirect_url", "training_url", "email_config_id"}
+        sets, vals = [], []
+        for k, v in fields.items():
+            if k in allowed and v is not None:
+                sets.append(f"{k} = ?")
+                vals.append(v)
+        if not sets:
+            return campaign
+        sets.append("updated_at = ?")
+        vals.append(_utcnow_iso())
+        vals.extend([campaign_id, self.tenant_id])
+        with _db_lock:
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute(f"UPDATE campaigns SET {', '.join(sets)} WHERE id = ? AND tenant_id = ?", vals)
+            conn.commit()
+            conn.close()
+        return self.get_campaign(campaign_id)
 
     def get_engagement_device_stats(self, campaign_id: str) -> dict:
         """Return open/click device and OS breakdown for campaign analytics UI."""
