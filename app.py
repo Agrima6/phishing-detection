@@ -3080,6 +3080,26 @@ def _platform_email_template(heading: str, body_html: str,
 </html>"""
 
 
+SUPER_ADMIN_NOTIFY_EMAIL = os.environ.get("SUPER_ADMIN_NOTIFY_EMAIL", "vinitvyaduvanshi@gmail.com")
+
+
+def _notify_super_admin(subject: str, heading: str, body_html: str,
+                        cta_label: str | None = None, cta_url: str | None = None) -> None:
+    """Best-effort email to the platform super admin (e.g. a new company
+    registration). Never raises - a failure must not break the public request
+    that triggered it."""
+    if not SUPER_ADMIN_NOTIFY_EMAIL:
+        return
+    try:
+        _send_platform_email(
+            SUPER_ADMIN_NOTIFY_EMAIL,
+            subject,
+            _platform_email_template(heading, body_html, cta_label=cta_label, cta_url=cta_url),
+        )
+    except Exception as exc:
+        logging.warning(f"Super-admin notification failed: {exc}")
+
+
 @app.route("/api/auth/login", methods=["POST", "OPTIONS"])
 def auth_login():
     if request.method == "OPTIONS":
@@ -3213,6 +3233,25 @@ def public_register():
         logging.error(f"Registration email failed: {exc}", exc_info=True)
         email_warning = "Registration received, but the onboarding email failed to send."
 
+    # Let the platform super admin know a new company has registered.
+    _notify_super_admin(
+        f"New registration: {company_name}",
+        "A new company has registered",
+        (
+            "<p style='margin:0 0 14px;'>A new company has just registered on Workmate Shield and started onboarding:</p>"
+            "<table style='font-size:14px;color:#374151;border-collapse:collapse;'>"
+            f"<tr><td style='padding:3px 14px 3px 0;color:#6b7280;'>Company</td><td style='padding:3px 0;'><strong>{escape(company_name)}</strong></td></tr>"
+            f"<tr><td style='padding:3px 14px 3px 0;color:#6b7280;'>Contact</td><td style='padding:3px 0;'>{escape(contact_name)}</td></tr>"
+            f"<tr><td style='padding:3px 14px 3px 0;color:#6b7280;'>Email</td><td style='padding:3px 0;'>{escape(contact_email)}</td></tr>"
+            f"<tr><td style='padding:3px 14px 3px 0;color:#6b7280;'>Mobile</td><td style='padding:3px 0;'>{escape(contact_mobile or '-')}</td></tr>"
+            f"<tr><td style='padding:3px 14px 3px 0;color:#6b7280;'>Designation</td><td style='padding:3px 0;'>{escape(designation or '-')}</td></tr>"
+            "</table>"
+            "<p style='margin:16px 0 0;font-size:13px;color:#6b7280;'>They will appear for your approval once they complete onboarding.</p>"
+        ),
+        cta_label="Open Super Admin Console",
+        cta_url=f"{config.FRONTEND_URL}/dashboard/super-admin",
+    )
+
     result = {"id": registration["id"], "company_name": registration["company_name"]}
     if email_warning:
         result["email_warning"] = email_warning
@@ -3256,6 +3295,23 @@ def public_onboarding(token):
         return _json_response({"error": str(exc)}, 409)
     if not reg:
         return _json_response({"error": "This onboarding link isn't valid"}, 404)
+
+    # Onboarding is complete and the registration is now SUBMITTED - this is
+    # the actionable moment, so prompt the super admin to review/approve.
+    _notify_super_admin(
+        f"Approval needed: {reg['company_name']}",
+        "A company is awaiting your approval",
+        (
+            f"<p style='margin:0 0 14px;'><strong>{escape(reg['company_name'])}</strong> has completed onboarding "
+            "and is awaiting your review and approval.</p>"
+            f"<p style='margin:0 0 14px;font-size:14px;color:#374151;'>Contact: {escape(reg.get('contact_name') or '')} "
+            f"&lt;{escape(reg.get('contact_email') or '')}&gt;</p>"
+            "<p style='margin:0;font-size:13px;color:#6b7280;'>Open the console to verify the details, then approve, "
+            "request changes, or reject.</p>"
+        ),
+        cta_label="Review and approve",
+        cta_url=f"{config.FRONTEND_URL}/dashboard/super-admin",
+    )
     return _json_response({"status": reg["status"]})
 
 
@@ -3381,6 +3437,61 @@ def admin_registration_reject(registration_id):
         return _json_response({"error": "Registration not found"}, 404)
     _log_audit("TENANT", f"Rejected registration for \"{reg['company_name']}\"")
     return _json_response(reg)
+
+
+@app.route("/api/admin/registrations/<registration_id>/request-changes", methods=["POST", "OPTIONS"])
+def admin_registration_request_changes(registration_id):
+    """Send a submitted registration back to the applicant with reviewer notes
+    and a fresh onboarding link, so they can correct and resubmit."""
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_tenants"):
+        return _unauthorized() if not role else _forbidden("manage_tenants")
+    body = request.get_json(force=True, silent=True) or {}
+    notes = (body.get("notes") or "").strip()
+    if not notes:
+        return _json_response({"error": "Please describe what needs to be changed."}, 400)
+
+    result = RegistrationService().request_changes(registration_id, notes)
+    if not result:
+        return _json_response({"error": "Registration not found"}, 404)
+    reg, raw_token = result
+    onboarding_url = f"{config.FRONTEND_URL}/onboarding/{raw_token}"
+
+    email_warning = None
+    try:
+        _send_platform_email(
+            reg["contact_email"],
+            f"Please update your Workmate Shield onboarding for {reg['company_name']}",
+            _platform_email_template(
+                "A few changes are needed",
+                (
+                    f"<p style='margin:0 0 14px;'>Hi {escape(reg.get('contact_name') or '')},</p>"
+                    f"<p style='margin:0 0 14px;'>Thank you for submitting your onboarding for "
+                    f"<strong>{escape(reg['company_name'])}</strong>. Before we can approve it, our team would be "
+                    "grateful if you could review and update the following:</p>"
+                    f"<div style='margin:0 0 14px;padding:12px 14px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;font-size:14px;color:#7c2d12;white-space:pre-wrap;'>{escape(notes)}</div>"
+                    "<p style='margin:0 0 14px;'>Please click the button below to update your details and resubmit. "
+                    "Thank you for your patience.</p>"
+                    f"<p style='margin:18px 0 6px;font-size:13px;color:#6b7280;'>If the button does not work, copy and paste this link:</p>"
+                    f"<p style='margin:0;font-size:13px;'><a href='{onboarding_url}' style='color:#7a1220;word-break:break-all;'>{onboarding_url}</a></p>"
+                ),
+                cta_label="Update my details",
+                cta_url=onboarding_url,
+            ),
+        )
+    except Exception as exc:
+        logging.error(f"Request-changes email failed: {exc}", exc_info=True)
+        email_warning = "Changes requested, but the email to the applicant failed to send."
+
+    _log_audit("TENANT", f"Requested changes on registration for \"{reg['company_name']}\"")
+    out = {"registration": reg}
+    if email_warning:
+        out["email_warning"] = email_warning
+    if os.environ.get("EXPOSE_ONBOARDING_URL") == "true":
+        out["debug_onboarding_url"] = onboarding_url
+    return _json_response(out)
 
 
 @app.route("/api/auth/branding", methods=["GET", "OPTIONS"])

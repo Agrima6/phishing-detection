@@ -283,3 +283,24 @@ class RegistrationService:
             conn.commit()
             conn.close()
         return self.get(registration_id)
+
+    def request_changes(self, registration_id: str, notes: str = "") -> tuple[dict, str] | None:
+        """Send a SUBMITTED registration back to the applicant for edits.
+        Stores the reviewer's notes (reusing reject_reason) and rotates the
+        onboarding token so a fresh, single-use link can be emailed. The
+        applicant can then resubmit (submit_onboarding allows CHANGES_REQUESTED)."""
+        reg = self.get(registration_id)
+        if not reg:
+            return None
+        raw_token = secrets.token_urlsafe(24)
+        with _db_lock:
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE registrations SET status = 'CHANGES_REQUESTED', reject_reason = ?, "
+                "onboarding_token_hash = ?, reviewed_at = ? WHERE id = ?",
+                (notes, _hash_token(raw_token), _utcnow_iso(), registration_id),
+            )
+            conn.commit()
+            conn.close()
+        return self.get(registration_id), raw_token
