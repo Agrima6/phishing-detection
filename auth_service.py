@@ -304,3 +304,24 @@ class RegistrationService:
             conn.commit()
             conn.close()
         return self.get(registration_id), raw_token
+
+    def resend_onboarding(self, registration_id: str) -> tuple[dict, str] | None:
+        """Rotate the onboarding token for a registration that has not yet been
+        submitted, so a fresh reminder link can be emailed (follow-up on a
+        pending onboarding). Status is left unchanged."""
+        reg = self.get(registration_id)
+        if not reg:
+            return None
+        if reg["status"] not in ("PENDING_ONBOARDING", "CHANGES_REQUESTED"):
+            raise ValueError(f"Cannot resend onboarding in status {reg['status']}")
+        raw_token = secrets.token_urlsafe(24)
+        with _db_lock:
+            conn = _get_conn()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE registrations SET onboarding_token_hash = ? WHERE id = ?",
+                (_hash_token(raw_token), registration_id),
+            )
+            conn.commit()
+            conn.close()
+        return self.get(registration_id), raw_token

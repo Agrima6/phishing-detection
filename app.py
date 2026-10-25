@@ -3401,16 +3401,30 @@ def admin_registration_approve(registration_id):
     login_url = f"{config.FRONTEND_URL}/auth/login"
     email_warning = None
     try:
+        approve_body = (
+            f"<p style='margin:0 0 14px;'>Dear {escape(tenant['contact_name'] or 'there')},</p>"
+            f"<p style='margin:0 0 14px;'>We are truly delighted to let you know that "
+            f"<strong>{escape(tenant['company_name'])}</strong> has been approved on Workmate Shield. "
+            "Thank you so much for your patience during our review — we are honoured to have you with us and "
+            "look forward to supporting your security-awareness journey every step of the way.</p>"
+            "<p style='margin:0 0 14px;'>You can now sign in to your dashboard using the details below. For your "
+            "security, we kindly request that you set a new password the first time you sign in.</p>"
+            "<div style='margin:0 0 6px;padding:14px 16px;background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;font-size:14px;color:#374151;'>"
+            f"<div style='margin-bottom:6px;'><span style='color:#6b7280;'>Email:</span> <strong>{escape(user['email'])}</strong></div>"
+            f"<div><span style='color:#6b7280;'>Temporary password:</span> <strong style='font-family:monospace;'>{escape(temp_password)}</strong></div>"
+            "</div>"
+            "<p style='margin:16px 0 0;font-size:13px;color:#6b7280;'>If there is anything at all we can help with, "
+            "please do not hesitate to reach out — we would be glad to assist.</p>"
+        )
         _send_platform_email(
             user["email"],
-            f"{tenant['company_name']} is approved on Workmate Shield - here's your login",
-            f"""<p>Hi {escape(tenant['contact_name'] or '')},</p>
-                <p><strong>{escape(tenant['company_name'])}</strong> has been approved on Workmate Shield.
-                You can now sign in to your dashboard:</p>
-                <p><a href="{login_url}">{login_url}</a></p>
-                <p>Email: {escape(user['email'])}<br>Temporary password: <strong>{escape(temp_password)}</strong></p>
-                <p>You'll be asked to set a new password the first time you sign in.</p>
-                <p>- The Workmate Shield team</p>""",
+            f"Welcome aboard — {tenant['company_name']} is approved on Workmate Shield",
+            _platform_email_template(
+                "Your account is approved",
+                approve_body,
+                cta_label="Sign in to your dashboard",
+                cta_url=login_url,
+            ),
         )
     except Exception as exc:
         logging.error(f"Approval email failed: {exc}", exc_info=True)
@@ -3486,6 +3500,56 @@ def admin_registration_request_changes(registration_id):
         email_warning = "Changes requested, but the email to the applicant failed to send."
 
     _log_audit("TENANT", f"Requested changes on registration for \"{reg['company_name']}\"")
+    out = {"registration": reg}
+    if email_warning:
+        out["email_warning"] = email_warning
+    if os.environ.get("EXPOSE_ONBOARDING_URL") == "true":
+        out["debug_onboarding_url"] = onboarding_url
+    return _json_response(out)
+
+
+@app.route("/api/admin/registrations/<registration_id>/resend-onboarding", methods=["POST", "OPTIONS"])
+def admin_registration_resend(registration_id):
+    """Follow up on a pending onboarding: email the applicant a gentle reminder
+    with a fresh onboarding link."""
+    if request.method == "OPTIONS":
+        return "", 200
+    role = _get_role()
+    if not _can(role, "manage_tenants"):
+        return _unauthorized() if not role else _forbidden("manage_tenants")
+    try:
+        result = RegistrationService().resend_onboarding(registration_id)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, 409)
+    if not result:
+        return _json_response({"error": "Registration not found"}, 404)
+    reg, raw_token = result
+    onboarding_url = f"{config.FRONTEND_URL}/onboarding/{raw_token}"
+
+    email_warning = None
+    try:
+        _send_platform_email(
+            reg["contact_email"],
+            f"A gentle reminder to finish setting up {reg['company_name']} on Workmate Shield",
+            _platform_email_template(
+                "Just a gentle reminder",
+                (
+                    f"<p style='margin:0 0 14px;'>Hi {escape(reg.get('contact_name') or '')},</p>"
+                    f"<p style='margin:0 0 14px;'>We noticed your onboarding for <strong>{escape(reg['company_name'])}</strong> "
+                    "is not quite finished yet. Whenever it is convenient, we would be truly grateful if you could take a "
+                    "couple of minutes to complete it so we can get your account ready for you.</p>"
+                    f"<p style='margin:18px 0 6px;font-size:13px;color:#6b7280;'>If the button does not work, please copy and paste this link:</p>"
+                    f"<p style='margin:0;font-size:13px;'><a href='{onboarding_url}' style='color:#7a1220;word-break:break-all;'>{onboarding_url}</a></p>"
+                ),
+                cta_label="Finish onboarding",
+                cta_url=onboarding_url,
+            ),
+        )
+    except Exception as exc:
+        logging.error(f"Resend onboarding email failed: {exc}", exc_info=True)
+        email_warning = "Could not send the reminder email."
+
+    _log_audit("TENANT", f"Resent onboarding link for \"{reg['company_name']}\"")
     out = {"registration": reg}
     if email_warning:
         out["email_warning"] = email_warning
