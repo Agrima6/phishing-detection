@@ -3040,6 +3040,46 @@ def _send_platform_email(to_email: str, subject: str, body_html: str) -> None:
         conn.sendmail(config.SMTP_FROM_EMAIL, [to_email], msg.as_string())
 
 
+def _platform_email_template(heading: str, body_html: str,
+                             cta_label: str | None = None,
+                             cta_url: str | None = None) -> str:
+    """Wrap transactional email content in a responsive, email-safe branded
+    layout (inline styles + tables so it renders in Gmail/Outlook). `body_html`
+    is trusted caller-built HTML; any user-supplied values must already be
+    escaped by the caller."""
+    button = ""
+    if cta_label and cta_url:
+        button = f"""
+              <table role="presentation" cellpadding="0" cellspacing="0" style="margin:26px 0 8px;">
+                <tr><td align="center" bgcolor="#7a1220" style="border-radius:8px;">
+                  <a href="{cta_url}" style="display:inline-block;padding:13px 30px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px;">{escape(cta_label)}</a>
+                </td></tr>
+              </table>"""
+    return f"""<!DOCTYPE html>
+<html>
+  <body style="margin:0;padding:0;background-color:#f4f5f7;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f5f7;padding:32px 12px;">
+      <tr><td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e5e7eb;">
+          <tr><td style="background-color:#7a1220;padding:22px 32px;">
+            <span style="font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:bold;letter-spacing:0.5px;color:#ffffff;">WORKMATE <span style="color:#f4b8bf;">SHIELD</span></span>
+          </td></tr>
+          <tr><td style="padding:32px;font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
+            <h1 style="margin:0 0 16px;font-size:20px;line-height:1.3;color:#111827;">{escape(heading)}</h1>
+            <div style="font-size:15px;line-height:1.65;color:#374151;">{body_html}</div>
+            {button}
+          </td></tr>
+          <tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#6b7280;line-height:1.6;">
+            Thanks,<br><strong style="color:#4b5563;">The Workmate Shield Team</strong>
+            <p style="margin:12px 0 0;font-size:11px;color:#9ca3af;">This is an automated message from Workmate Shield. If you did not request this, please ignore this email.</p>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>"""
+
+
 @app.route("/api/auth/login", methods=["POST", "OPTIONS"])
 def auth_login():
     if request.method == "OPTIONS":
@@ -3148,14 +3188,26 @@ def public_register():
 
     email_warning = None
     try:
+        onboarding_body = (
+            f"<p style='margin:0 0 14px;'>Hi {escape(contact_name)},</p>"
+            f"<p style='margin:0 0 14px;'>Thank you for registering <strong>{escape(company_name)}</strong> with "
+            f"Workmate Shield — we are truly glad to have you with us.</p>"
+            f"<p style='margin:0 0 14px;'>Please click the button below to continue your onboarding and finish "
+            f"setting up your account. It only takes a couple of minutes, and we would be grateful if you could "
+            f"complete it at your earliest convenience.</p>"
+            f"<p style='margin:18px 0 6px;font-size:13px;color:#6b7280;'>If the button does not work, please copy and "
+            f"paste this link into your browser:</p>"
+            f"<p style='margin:0;font-size:13px;'><a href='{onboarding_url}' style='color:#7a1220;word-break:break-all;'>{onboarding_url}</a></p>"
+        )
         _send_platform_email(
             contact_email,
-            f"Finish onboarding {company_name} to Workmate Shield",
-            f"""<p>Hi {escape(contact_name)},</p>
-                <p>Thanks for registering <strong>{escape(company_name)}</strong> with Workmate Shield.
-                Continue your onboarding here:</p>
-                <p><a href="{onboarding_url}">{onboarding_url}</a></p>
-                <p>- The Workmate Shield team</p>""",
+            f"Please finish setting up {company_name} on Workmate Shield",
+            _platform_email_template(
+                "Finish setting up your account",
+                onboarding_body,
+                cta_label="Continue onboarding",
+                cta_url=onboarding_url,
+            ),
         )
     except Exception as exc:
         logging.error(f"Registration email failed: {exc}", exc_info=True)
