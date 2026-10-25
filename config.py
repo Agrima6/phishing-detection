@@ -84,7 +84,14 @@ class Config:
         # (confirmed via ENETUNREACH on a sibling project on this same VPS),
         # so plain SMTP silently hangs here rather than erroring cleanly.
         self.RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
-        self.PLATFORM_EMAIL_FROM = os.environ.get('PLATFORM_EMAIL_FROM', '')
+        # Platform (onboarding/approval/notification) sender. Now that
+        # workmateshield.com is a verified Resend domain, send from it with a
+        # "Workmate Shield" display name. Fall back to the branded default when
+        # the env var is empty or still points at the old workmateiq address.
+        _platform_from = os.environ.get('PLATFORM_EMAIL_FROM', '').strip()
+        if not _platform_from or 'workmateiq' in _platform_from.lower():
+            _platform_from = 'Workmate Shield <security@workmateshield.com>'
+        self.PLATFORM_EMAIL_FROM = _platform_from
 
         # ── Clerk authentication (admin dashboard login) ─────────────────────
         self.CLERK_PUBLISHABLE_KEY = os.environ.get('CLERK_PUBLISHABLE_KEY', '')
