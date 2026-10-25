@@ -147,17 +147,41 @@ class RegistrationService:
 
     def create_registration(self, company_name: str, contact_name: str, contact_email: str,
                              contact_mobile: str = "", designation: str = "") -> tuple[dict, str]:
+        email = contact_email.strip().lower()
         raw_token = secrets.token_urlsafe(24)
-        row = {
-            "id": str(uuid.uuid4()), "company_name": company_name,
-            "contact_name": contact_name, "contact_email": contact_email.strip().lower(),
-            "contact_mobile": contact_mobile, "designation": designation,
-            "status": "PENDING_ONBOARDING", "onboarding_token_hash": _hash_token(raw_token),
-            "created_at": _utcnow_iso(),
-        }
+        token_hash = _hash_token(raw_token)
+        now = _utcnow_iso()
         with _db_lock:
             conn = _get_conn()
             cursor = conn.cursor()
+            # If this email already has a registration that hasn't been approved
+            # yet (i.e. an inactive/incomplete record), reactivate it in place and
+            # issue a fresh onboarding link instead of creating a duplicate row.
+            cursor.execute(
+                "SELECT * FROM registrations WHERE LOWER(contact_email) = ? AND status != 'APPROVED' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (email,),
+            )
+            existing = _fetchone_dict(cursor)
+            if existing:
+                cursor.execute("""
+                    UPDATE registrations
+                    SET company_name = ?, contact_name = ?, contact_mobile = ?, designation = ?,
+                        status = 'PENDING_ONBOARDING', onboarding_token_hash = ?
+                    WHERE id = ?
+                """, (company_name, contact_name, contact_mobile, designation, token_hash, existing["id"]))
+                conn.commit()
+                cursor.execute("SELECT * FROM registrations WHERE id = ?", (existing["id"],))
+                row = _fetchone_dict(cursor)
+                conn.close()
+                return row, raw_token
+            row = {
+                "id": str(uuid.uuid4()), "company_name": company_name,
+                "contact_name": contact_name, "contact_email": email,
+                "contact_mobile": contact_mobile, "designation": designation,
+                "status": "PENDING_ONBOARDING", "onboarding_token_hash": token_hash,
+                "created_at": now,
+            }
             cursor.execute("""
                 INSERT INTO registrations
                   (id, company_name, contact_name, contact_email, contact_mobile,
@@ -206,7 +230,8 @@ class RegistrationService:
         return rows
 
     def submit_onboarding(self, raw_token: str, address: str, gst_number: str,
-                           employee_count: str, logo_url: str, primary_color: str) -> dict | None:
+                           employee_count: str, logo_url: str, primary_color: str,
+                           secondary_color: str = "#1f2937") -> dict | None:
         reg = self.get_by_token(raw_token)
         if not reg:
             return None
@@ -218,9 +243,10 @@ class RegistrationService:
             cursor.execute("""
                 UPDATE registrations
                 SET address = ?, gst_number = ?, employee_count = ?, logo_url = ?,
-                    primary_color = ?, status = 'SUBMITTED', submitted_at = ?
+                    primary_color = ?, secondary_color = ?, status = 'SUBMITTED', submitted_at = ?
                 WHERE id = ?
-            """, (address, gst_number, employee_count, logo_url, primary_color, _utcnow_iso(), reg["id"]))
+            """, (address, gst_number, employee_count, logo_url, primary_color, secondary_color,
+                  _utcnow_iso(), reg["id"]))
             conn.commit()
             conn.close()
         return self.get(reg["id"])

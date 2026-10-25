@@ -125,6 +125,7 @@ def _init_db():
             employee_count      TEXT    NOT NULL DEFAULT '',
             logo_url            TEXT    NOT NULL DEFAULT '',
             primary_color       TEXT    NOT NULL DEFAULT '#7a1220',
+            secondary_color     TEXT    NOT NULL DEFAULT '#1f2937',
             reject_reason       TEXT    NOT NULL DEFAULT '',
             tenant_id           TEXT    DEFAULT NULL,
             created_at          TEXT    NOT NULL,
@@ -267,6 +268,8 @@ def _init_db():
             reg_cols = _table_columns(cursor, "registrations")
             if "name_updated_at" not in reg_cols:
                 cursor.execute("ALTER TABLE registrations ADD COLUMN name_updated_at TEXT DEFAULT NULL")
+            if "secondary_color" not in reg_cols:
+                cursor.execute("ALTER TABLE registrations ADD COLUMN secondary_color TEXT NOT NULL DEFAULT '#1f2937'")
 
             for idx in index_statements:
                 cursor.execute(idx)

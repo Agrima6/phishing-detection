@@ -3353,13 +3353,14 @@ def public_onboarding(token):
     employee_count = (body.get("employee_count") or "").strip()
     logo_url = (body.get("logo_url") or "").strip()
     primary_color = (body.get("primary_color") or "#7a1220").strip()
+    secondary_color = (body.get("secondary_color") or "#1f2937").strip()
     if not address:
-        return _json_response({"error": "Company registered address is required"}, 400)
+        return _json_response({"error": "Company address is required"}, 400)
     if gst_number and not re.match(r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$', gst_number.upper()):
         return _json_response({"error": "Enter a valid 15-character GSTIN, or leave it blank."}, 400)
 
     try:
-        reg = reg_svc.submit_onboarding(token, address, gst_number, employee_count, logo_url, primary_color)
+        reg = reg_svc.submit_onboarding(token, address, gst_number, employee_count, logo_url, primary_color, secondary_color)
     except ValueError as exc:
         return _json_response({"error": str(exc)}, 409)
     if not reg:
