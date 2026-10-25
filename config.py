@@ -89,8 +89,10 @@ class Config:
         # "Workmate Shield" display name. Fall back to the branded default when
         # the env var is empty or still points at the old workmateiq address.
         _platform_from = os.environ.get('PLATFORM_EMAIL_FROM', '').strip()
-        if not _platform_from or 'workmateiq' in _platform_from.lower():
-            _platform_from = 'Workmate Shield <security@workmateshield.com>'
+        _pf_lower = _platform_from.lower()
+        if (not _platform_from or 'workmateiq' in _pf_lower
+                or 'security@workmateshield' in _pf_lower):
+            _platform_from = 'Workmate Shield <update@workmateshield.com>'
         self.PLATFORM_EMAIL_FROM = _platform_from
 
         # ── Clerk authentication (admin dashboard login) ─────────────────────

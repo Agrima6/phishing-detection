@@ -3127,8 +3127,11 @@ def _platform_email_template(heading: str, body_html: str,
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f5f7;padding:32px 12px;">
       <tr><td align="center">
         <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e5e7eb;">
-          <tr><td style="background-color:#7a1220;padding:22px 32px;">
-            <span style="font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:bold;letter-spacing:0.5px;color:#ffffff;">WORKMATE <span style="color:#f4b8bf;">SHIELD</span></span>
+          <tr><td style="background-color:#7a1220;padding:18px 32px;">
+            <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:middle;"><img src="{config.FRONTEND_URL}/workmate-shield-logo.png" width="40" height="40" alt="Workmate Shield" style="display:block;border-radius:8px;background:#ffffff;" /></td>
+              <td style="vertical-align:middle;font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:bold;letter-spacing:0.5px;color:#ffffff;">WORKMATE <span style="color:#f4b8bf;">SHIELD</span></td>
+            </tr></table>
           </td></tr>
           <tr><td style="padding:32px;font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
             <h1 style="margin:0 0 16px;font-size:20px;line-height:1.3;color:#111827;">{escape(heading)}</h1>
@@ -3136,7 +3139,7 @@ def _platform_email_template(heading: str, body_html: str,
             {button}
           </td></tr>
           <tr><td style="padding:20px 32px;border-top:1px solid #f0f0f0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#6b7280;line-height:1.6;">
-            Thanks,<br><strong style="color:#4b5563;">The Workmate Shield Team</strong>
+            Regards,<br><strong style="color:#4b5563;">The Workmate Shield Team</strong>
             <p style="margin:12px 0 0;font-size:11px;color:#9ca3af;">This is an automated message from Workmate Shield. If you did not request this, please ignore this email.</p>
           </td></tr>
         </table>
