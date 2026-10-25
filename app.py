@@ -960,9 +960,11 @@ def _dispatch_single_email(svc: PhishingCampaignService, campaign: dict, recipie
             f"&r={_urlencode(redirect_url, safe='')}"
         )
     else:
-        # Clean short URL that records the click and then 302-redirects
-        # straight to the campaign's Step-4 redirect URL (no interstitial).
-        click_track_url = f"{base_url}/r/{recipient['tracking_token']}"
+        # Send recipients to the company-branded awareness landing page (a
+        # simulated sign-in that looks like their own portal). After they
+        # "sign in" they see the phishing-awareness message, whose final
+        # "real sign-in" button goes to the campaign's Step-4 redirect URL.
+        click_track_url = f"{base_url}/auth/verify/{recipient['tracking_token']}"
 
     body_html = campaign["body_html"]
     first_name = _first_name(recipient.get("name", recipient["email"]))
