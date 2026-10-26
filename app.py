@@ -702,11 +702,27 @@ _TRACKING_PIXEL = (
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+def _is_valid_http_url(url: str) -> bool:
+    """http(s) only, with an actual host - rejects javascript:, data:, bare
+    strings like "not a url", and scheme-less input that urlparse would
+    otherwise happily call "valid" with an empty netloc."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
 # Letters, digits, whitespace, and the punctuation that actually shows up in
 # real addresses (, . - / ' # &); deliberately excludes ! @ and everything
 # else that isn't. Matches the onboarding form's client-side rule exactly -
 # kept here, not inline, since it's also applied server-side below.
 _ADDRESS_RE = re.compile(r"^[A-Za-z0-9\s,.\-/'#&]{5,300}$")
+
+# Must match EMPLOYEE_RANGES in phishshield/app/onboarding/[token]/page.tsx
+# exactly - that dropdown is the only source of this value, so anything
+# else here means the request didn't come from it.
+EMPLOYEE_RANGE_OPTIONS = {'1-50', '51-100', '101-200', '201-300', '301-500', '501-750', '751-1000', '1000+'}
 
 # ---------------------------------------------------------------------------
 # CORS – applied globally via after_request
@@ -1256,9 +1272,19 @@ def campaigns():
         channel = (body.get("channel") or "email").strip().lower()
         if channel not in ("email", "whatsapp"):
             return _json_response({"error": "channel must be 'email' or 'whatsapp'"}, 400)
+        if len(name) > 200:
+            return _json_response({"error": "Campaign name must be 200 characters or fewer"}, 400)
         sender_name = (body.get("sender_name") or "Security Team").strip()
+        if len(sender_name) > 100:
+            return _json_response({"error": "Sender name must be 100 characters or fewer"}, 400)
         redirect_url = (body.get("redirect_url") or "").strip()
+        if redirect_url and not _is_valid_http_url(redirect_url):
+            return _json_response({"error": "Redirect URL must be a valid http:// or https:// URL"}, 400)
         training_url = (body.get("training_url") or "").strip()
+        # An uploaded video's own URL (always our domain) needs no extra
+        # check here - only validate when it looks like a hand-typed link.
+        if training_url and not training_url.startswith(config.PHISHING_BASE_URL) and not _is_valid_http_url(training_url):
+            return _json_response({"error": "Training resource must be a valid http:// or https:// URL"}, 400)
         email_config_id = (body.get("email_config_id") or "").strip() or None
         whatsapp_config_id = (body.get("whatsapp_config_id") or "").strip() or None
 
@@ -1266,6 +1292,8 @@ def campaigns():
             message_body = (body.get("message_body") or "").strip()
             if not name or not message_body:
                 return _json_response({"error": "name and message_body are required for WhatsApp campaigns"}, 400)
+            if len(message_body) > 4096:
+                return _json_response({"error": "Message body must be 4096 characters or fewer"}, 400)
             campaign = svc.create_campaign(
                 name, subject="", body_html="", sender_name=sender_name, redirect_url=redirect_url,
                 channel="whatsapp", whatsapp_config_id=whatsapp_config_id, message_body=message_body,
@@ -1276,6 +1304,8 @@ def campaigns():
             body_html = (body.get("body_html") or "").strip()
             if not name or not subject or not body_html:
                 return _json_response({"error": "name, subject, and body_html are required"}, 400)
+            if len(subject) > 300:
+                return _json_response({"error": "Subject must be 300 characters or fewer"}, 400)
             # Independent of whatever the frontend preview shows - the header
             # image becomes part of the stored body_html itself, so every
             # send path (Resend/SendGrid/SMTP) includes it with no further
@@ -1302,6 +1332,20 @@ def campaign_detail(campaign_id):
         body = request.get_json(force=True, silent=True) or {}
         fields = {k: body[k] for k in ("name", "subject", "body_html", "sender_name",
                                         "redirect_url", "training_url", "email_config_id") if k in body}
+        # Same rules as creating a campaign - PATCH is the other write path
+        # into these same columns and must not be a way to bypass them.
+        if "name" in fields and len((fields["name"] or "").strip()) > 200:
+            return _json_response({"error": "Campaign name must be 200 characters or fewer"}, 400)
+        if "subject" in fields and len((fields["subject"] or "").strip()) > 300:
+            return _json_response({"error": "Subject must be 300 characters or fewer"}, 400)
+        if "sender_name" in fields and len((fields["sender_name"] or "").strip()) > 100:
+            return _json_response({"error": "Sender name must be 100 characters or fewer"}, 400)
+        redirect_url = (fields.get("redirect_url") or "").strip()
+        if redirect_url and not _is_valid_http_url(redirect_url):
+            return _json_response({"error": "Redirect URL must be a valid http:// or https:// URL"}, 400)
+        training_url = (fields.get("training_url") or "").strip()
+        if training_url and not training_url.startswith(config.PHISHING_BASE_URL) and not _is_valid_http_url(training_url):
+            return _json_response({"error": "Training resource must be a valid http:// or https:// URL"}, 400)
         if "body_html" in fields:
             fields["body_html"] = _inject_header_image(fields["body_html"], (body.get("header_image_url") or "").strip())
         svc = PhishingCampaignService(tenant_id=_get_tenant_id())
@@ -2702,15 +2746,29 @@ def employees():
             return _json_response(svc.list_employees())
         body = request.get_json(force=True, silent=True) or {}
         name = (body.get("name") or "").strip()
-        email = (body.get("email") or "").strip()
+        email = (body.get("email") or "").strip().lower()
         if not name or not email:
             return _json_response({"error": "Name and email are required"}, 400)
+        if len(name) > 100:
+            return _json_response({"error": "Name must be 100 characters or fewer"}, 400)
+        if not _EMAIL_RE.match(email):
+            return _json_response({"error": "Enter a valid email address"}, 400)
+        phone = (body.get("phone") or "").strip()
+        # Loosely international (unlike the India-specific registration-form
+        # rule) - employees are added by an org admin who may have a global
+        # workforce, so this only rejects things that clearly aren't a phone
+        # number rather than enforcing one country's format.
+        if phone and not re.match(r"^\+?[0-9][0-9 \-()]{6,19}$", phone):
+            return _json_response({"error": "Enter a valid phone number"}, 400)
+        risk_rating = (body.get("riskRating") or "low").strip().lower()
+        if risk_rating not in ("low", "medium", "high"):
+            return _json_response({"error": "riskRating must be one of: low, medium, high"}, 400)
         employee = svc.create_employee(
             name=name, email=email,
-            department=(body.get("department") or "").strip(),
-            manager=(body.get("manager") or "").strip(),
-            risk_rating=(body.get("riskRating") or "low"),
-            phone=(body.get("phone") or "").strip(),
+            department=(body.get("department") or "").strip()[:100],
+            manager=(body.get("manager") or "").strip()[:100],
+            risk_rating=risk_rating,
+            phone=phone,
         )
         if employee.get("phone"):
             employee = dict(employee)
@@ -2741,6 +2799,25 @@ def employee_detail(employee_id):
             _log_audit("EMPLOYEE", f"Employee \"{existing['name'] if existing else employee_id}\" deleted")
             return _json_response({"message": "Employee deleted"})
         body = request.get_json(force=True, silent=True) or {}
+        # update_employee() applies an updatable-field allowlist itself, but
+        # validates nothing - this was the only path into the employees
+        # table with no checks at all (create_employee above enforces
+        # these same rules; PATCH must not be a way around them).
+        if "email" in body:
+            body["email"] = (body["email"] or "").strip().lower()
+            if not body["email"] or not _EMAIL_RE.match(body["email"]):
+                return _json_response({"error": "Enter a valid email address"}, 400)
+        if "name" in body:
+            body["name"] = (body["name"] or "").strip()
+            if not body["name"]:
+                return _json_response({"error": "Name is required"}, 400)
+            if len(body["name"]) > 100:
+                return _json_response({"error": "Name must be 100 characters or fewer"}, 400)
+        if "phone" in body and body["phone"]:
+            if not re.match(r"^\+?[0-9][0-9 \-()]{6,19}$", body["phone"].strip()):
+                return _json_response({"error": "Enter a valid phone number"}, 400)
+        if "risk_rating" in body and body["risk_rating"] not in ("low", "medium", "high"):
+            return _json_response({"error": "risk_rating must be one of: low, medium, high"}, 400)
         updated = svc.update_employee(employee_id, body)
         if not updated:
             return _json_response({"error": "Employee not found"}, 404)
@@ -2903,6 +2980,11 @@ def tenant_settings():
         if request.method == "GET":
             return _json_response(svc.to_frontend_shape())
         body = request.get_json(force=True, silent=True) or {}
+        branding = body.get("branding") or {}
+        for color_field in ("primary_color", "secondary_color"):
+            color_val = branding.get(color_field)
+            if color_val and not re.match(r"^#[0-9a-fA-F]{6}$", color_val):
+                return _json_response({"error": f"{color_field} must be a 6-digit hex color like #7a1220"}, 400)
         old_name = svc.get_settings_raw().get("name")
         raw = svc.save_settings(body)
         new_name = raw.get("name")
@@ -3501,6 +3583,11 @@ def public_onboarding(token):
         )
     if gst_number and not re.match(r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$', gst_number.upper()):
         return _json_response({"error": "Enter a valid 15-character GSTIN, or leave it blank."}, 400)
+    for color_label, color_val in (("Primary color", primary_color), ("Secondary color", secondary_color)):
+        if not re.match(r"^#[0-9a-fA-F]{6}$", color_val):
+            return _json_response({"error": f"{color_label} must be a 6-digit hex color like #7a1220"}, 400)
+    if employee_count and employee_count not in EMPLOYEE_RANGE_OPTIONS:
+        return _json_response({"error": "employee_count must be one of the offered ranges"}, 400)
 
     try:
         reg = reg_svc.submit_onboarding(token, address, gst_number, employee_count, logo_url, primary_color, secondary_color)
