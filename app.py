@@ -65,6 +65,13 @@ from auth_service import AuthService, RegistrationService, generate_temp_passwor
 
 app = Flask(__name__, static_folder="static")
 app.secret_key = config.SECRET_KEY
+# Safety net above the largest legitimate upload (the 50 MB campaign video
+# limit) - Werkzeug rejects anything bigger with a clean 413 before it's
+# fully read into memory, instead of a request handler finding out partway
+# through. A reverse proxy's own body-size limit (e.g. nginx
+# client_max_body_size, commonly defaulted to 1 MB) can still reject a large
+# upload before it ever reaches this process - see the video upload route.
+app.config['MAX_CONTENT_LENGTH'] = 60 * 1024 * 1024
 
 # Render sets RENDER=true in every service's environment automatically. In that
 # environment the frontend (Vercel) and backend (Render) are different domains,
@@ -736,6 +743,14 @@ def not_found(e):
 @app.errorhandler(405)
 def method_not_allowed(e):
     return _json_response({"error": "Method not allowed"}, 405)
+
+
+@app.errorhandler(413)
+def request_entity_too_large(e):
+    # Hit when a request exceeds MAX_CONTENT_LENGTH - without this, Flask's
+    # default 413 response is an HTML page, which the frontend's JSON-only
+    # error handling (fetcher() in lib/api.ts) can't parse into a message.
+    return _json_response({"error": "Upload is too large for the server to accept"}, 413)
 
 
 @app.errorhandler(500)
@@ -2213,9 +2228,19 @@ def phishing_landing(token):
     # back to the redirect URL's brand otherwise.
     brand = _company_brand(campaign_tenant_id, redirect_to) or _brand_for_url(redirect_to)
     html = html_path.read_text(encoding="utf-8")
-    html = html.replace("'__REDIRECT_URL__'", f"'{_js_escape(redirect_to)}'")
+    # Targets only the `const _x = '__TOKEN__';` assignment line (each is
+    # unique in the template), not every occurrence of the quoted token -
+    # landing_page/index.html also compares against the bare placeholder
+    # string itself (e.g. `_training !== '__TRAINING_URL__'`) to detect
+    # "nothing was configured". A plain .replace() of '__TOKEN__' hits
+    # those comparisons too, substituting them with the same real value
+    # and making the comparison always false - redirect_to and
+    # training_url would silently never be treated as "set" (post-click
+    # redirect always fell back to the generic brand URL, and the
+    # training/video block never rendered for any campaign).
+    html = html.replace("const _redirect = '__REDIRECT_URL__';", f"const _redirect = '{_js_escape(redirect_to)}';", 1)
     html = html.replace("'__ORG_NAME__'", f"'{config.ORG_NAME}'")
-    html = html.replace("'__TRAINING_URL__'", f"'{_js_escape(training_url)}'")
+    html = html.replace("const _training = '__TRAINING_URL__';", f"const _training = '{_js_escape(training_url)}';", 1)
     html = html.replace("'__BRAND_FALLBACK_URL__'", f"'{_js_escape(brand['fallback_url'])}'")
     html = html.replace("__BRAND_TITLE__", escape(brand["title"]))
     html = html.replace("__BRAND_BG__", brand["bg"])
@@ -2593,6 +2618,71 @@ def upload_image():
     # pattern already used for the seed template's banner_url.
     public_url = f"{config.PHISHING_BASE_URL.rstrip('/')}/static/uploads/{filename}"
     return _json_response({'url': public_url})
+
+
+_ALLOWED_VIDEO_EXTS = {'.mp4', '.webm'}
+_MAX_VIDEO_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def _video_signature_matches(ext: str, data: bytes) -> bool:
+    """Check the leading bytes match the claimed video container type -
+    same "don't trust the extension/Content-Type alone" rule as images."""
+    if ext == '.mp4':
+        # MP4/MOV family: an ftyp box in the first few hundred bytes (not
+        # necessarily at byte 0 - some encoders write a small leading atom).
+        return b'ftyp' in data[:512]
+    if ext == '.webm':
+        return data[:4] == b'\x1a\x45\xdf\xa3'  # EBML header (WebM/Matroska)
+    return False
+
+
+@app.route("/api/phish/upload/video", methods=["POST", "OPTIONS"])
+def upload_video():
+    """Campaign training-video upload. Stored the same way as template/logo
+    images (see upload_image above) and referenced via the campaign's
+    existing training_url field - an uploaded video is just a URL that
+    happens to point at our own /static/uploads/*.mp4|.webm instead of
+    somewhere like YouTube, so no schema change or parallel field is needed."""
+    if request.method == "OPTIONS":
+        resp = make_response('', 204)
+        resp.headers['Access-Control-Allow-Origin']  = '*'
+        resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Session-Token'
+        return resp
+
+    role = _get_role()
+    if not role:
+        return _unauthorized()
+
+    file = request.files.get('video')
+    if not file or not file.filename:
+        return _json_response({'error': 'No file provided'}, 400)
+
+    ext = Path(file.filename).suffix.lower()
+    if ext not in _ALLOWED_VIDEO_EXTS:
+        return _json_response({'error': f'File type not allowed. Use: {sorted(_ALLOWED_VIDEO_EXTS)}'}, 400)
+
+    # Werkzeug spools large file uploads to a temp file rather than holding
+    # them fully in memory, so reading this is fine even near the 50 MB cap.
+    data = file.read()
+    if len(data) > _MAX_VIDEO_BYTES:
+        return _json_response({'error': 'Video exceeds the 50 MB limit'}, 400)
+    if not data:
+        return _json_response({'error': 'The uploaded file is empty'}, 400)
+    if not _video_signature_matches(ext, data):
+        return _json_response({'error': f'File content does not look like a valid {ext} video'}, 400)
+
+    filename = f"{uuid.uuid4().hex}{ext}"
+    dest = _UPLOADS_DIR / filename
+    try:
+        _UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    except OSError as exc:
+        logging.error(f"Video upload could not write {dest}: {exc}", exc_info=True)
+        return _json_response({'error': f'Server could not save the video ({exc.strerror or "write failed"})'}, 500)
+
+    public_url = f"{config.PHISHING_BASE_URL.rstrip('/')}/static/uploads/{filename}"
+    return _json_response({'url': public_url, 'size': len(data)})
 
 
 # ---------------------------------------------------------------------------

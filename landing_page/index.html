@@ -90,6 +90,16 @@
       .left { display: none; }
       .right { flex: 1 1 100%; }
     }
+    @media (max-width: 480px) {
+      .right { padding: 32px 20px; }
+      .card h1 { font-size: 1.7rem; }
+      .card .sub { font-size: 0.9rem; margin: 6px 0 24px; }
+      .field input { padding: 12px 12px 12px 40px; font-size: 0.95rem; }
+      .btn-primary { padding: 13px; }
+      .warning-title { font-size: 1.3rem; }
+      .warning-icon { font-size: 3rem; }
+      .warning-body { font-size: 0.92rem; }
+    }
   </style>
 </head>
 <body>
@@ -193,6 +203,17 @@
   const _fallback = '__BRAND_FALLBACK_URL__';
   const _training = '__TRAINING_URL__';
 
+  // training_url is tenant-admin-controlled data, not a fixed server
+  // constant - concatenating it unescaped into an HTML attribute via
+  // innerHTML (the only way this page builds the training block) would let
+  // a value containing a `"` break out of e.g. src="..."/href="..." and
+  // inject arbitrary markup/script into a page real recipients land on.
+  function escAttr(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
   /* ---- Password show/hide ---- */
   document.getElementById('eyeBtn').addEventListener('click', function () {
     var inp = document.getElementById('passwordInput');
@@ -211,14 +232,24 @@
       if (_training && _training !== '__TRAINING_URL__') {
         var tb = document.getElementById('trainingBlock');
         var yt = _training.match(/(?:youtube\.com\/.*[?&]v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([A-Za-z0-9_\-]{6,})/);
+        var isUploadedVideo = /\.(mp4|webm)(\?.*)?$/i.test(_training);
         if (yt) {
           tb.innerHTML = '<div style="font-weight:600;margin-bottom:8px;color:#333;">Watch this short awareness video:</div>' +
             '<div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:8px;">' +
             '<iframe src="https://www.youtube.com/embed/' + yt[1] + '" title="Security awareness training" frameborder="0" ' +
             'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen ' +
             'style="position:absolute;top:0;left:0;width:100%;height:100%;"></iframe></div>';
+        } else if (isUploadedVideo) {
+          // A campaign's own uploaded training video (see /api/phish/upload/video) -
+          // native playback, no third-party embed/tracking involved.
+          tb.innerHTML = '<div style="font-weight:600;margin-bottom:8px;color:#333;">Watch this short awareness video:</div>' +
+            '<video controls playsinline preload="metadata" ' +
+            'style="width:100%;max-width:100%;border-radius:8px;background:#000;display:block;">' +
+            '<source src="' + escAttr(_training) + '">' +
+            'Your browser does not support embedded video. <a href="' + escAttr(_training) + '">Download the video</a> instead.' +
+            '</video>';
         } else {
-          tb.innerHTML = '<a href="' + _training + '" target="_blank" rel="noopener noreferrer" ' +
+          tb.innerHTML = '<a href="' + escAttr(_training) + '" target="_blank" rel="noopener noreferrer" ' +
             'style="display:inline-block;padding:11px 22px;background:#111827;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;">' +
             'Open the awareness training &rarr;</a>';
         }
