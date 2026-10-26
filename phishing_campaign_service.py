@@ -363,6 +363,21 @@ def _init_db():
                 WHERE total_opened != (SELECT COUNT(*) FROM recipients r
                                        WHERE r.campaign_id = campaigns.id AND r.opened_at IS NOT NULL)
             """)
+            # A send job's actual work happens on a background thread inside
+            # one gunicorn worker process - only its DB row (send_jobs)
+            # survives a restart. If the process was killed/redeployed while
+            # a job was mid-flight (queued/validating/sending), that thread
+            # is gone forever but the row still says "in progress", which
+            # permanently blocks ever starting a new send for that campaign
+            # (see start_send_job's guard) and leaves the UI showing it stuck.
+            # Runs once per startup, before anything can create a new job.
+            cursor.execute("""
+                UPDATE send_jobs
+                SET state = 'error',
+                    error = 'Interrupted by a server restart before this finished - resend to try again.',
+                    finished_at = ?
+                WHERE state IN ('queued', 'validating', 'sending')
+            """, (_utcnow_iso(),))
             conn.commit()
         finally:
             # Always return the connection to the pool, even on failure -
