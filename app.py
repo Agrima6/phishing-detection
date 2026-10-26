@@ -109,6 +109,21 @@ def serve_upload(filename):
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+_NAME_EMAIL_RE = re.compile(r"^\s*(.*?)\s*<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$")
+
+
+def _bare_email(address: str) -> str:
+    """Strip a 'Display Name <email@x.com>' wrapper down to just the email.
+
+    config.PLATFORM_EMAIL_FROM is deliberately pre-wrapped like that for the
+    platform's own transactional mail (see config.py), but _send_via_resend
+    wraps resend_from_email in ANOTHER "name <...>" using the campaign's own
+    sender name - passing the already-wrapped string through unwrapped gives
+    Resend a nested "Name <Other Name <email>>" and a 422 on every send."""
+    m = _NAME_EMAIL_RE.match(address or "")
+    return m.group(2) if m else address
+
+
 def _default_email_config() -> dict:
     """The global .env-configured provider — today's (only) behavior, used
     whenever a campaign has no email_config_id or the id can't be found.
@@ -126,7 +141,7 @@ def _default_email_config() -> dict:
         "smtp_from_email": config.SMTP_FROM_EMAIL, "smtp_from_name": config.SMTP_FROM_NAME,
         "sendgrid_api_key": config.SENDGRID_API_KEY,
         "sendgrid_from_email": config.SENDGRID_FROM_EMAIL, "sendgrid_from_name": config.SENDGRID_FROM_NAME,
-        "resend_api_key": config.RESEND_API_KEY, "resend_from_email": config.PLATFORM_EMAIL_FROM,
+        "resend_api_key": config.RESEND_API_KEY, "resend_from_email": _bare_email(config.PLATFORM_EMAIL_FROM),
     }
 
 
