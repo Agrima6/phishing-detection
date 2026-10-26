@@ -695,6 +695,12 @@ _TRACKING_PIXEL = (
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# Letters, digits, whitespace, and the punctuation that actually shows up in
+# real addresses (, . - / ' # &); deliberately excludes ! @ and everything
+# else that isn't. Matches the onboarding form's client-side rule exactly -
+# kept here, not inline, since it's also applied server-side below.
+_ADDRESS_RE = re.compile(r"^[A-Za-z0-9\s,.\-/'#&]{5,300}$")
+
 # ---------------------------------------------------------------------------
 # CORS – applied globally via after_request
 # ---------------------------------------------------------------------------
@@ -3302,6 +3308,13 @@ def public_register():
     designation = (body.get("designation") or "").strip()
     if not company_name or not contact_name or not contact_email:
         return _json_response({"error": "Company name, contact name, and contact email are required"}, 400)
+    if not _EMAIL_RE.match(contact_email):
+        return _json_response({"error": "Enter a valid email address"}, 400)
+    # Mirrors the frontend's zod rule exactly - optional, but if given it
+    # must be a 10-digit number starting with 6. A client-only check lets
+    # anyone post straight to this API and skip it entirely.
+    if contact_mobile and not re.match(r"^6\d{9}$", contact_mobile):
+        return _json_response({"error": "Mobile number must start with 6 and be 10 digits"}, 400)
 
     reg_svc = RegistrationService()
     registration, raw_token = reg_svc.create_registration(
@@ -3391,6 +3404,11 @@ def public_onboarding(token):
     secondary_color = (body.get("secondary_color") or "#1f2937").strip()
     if not address:
         return _json_response({"error": "Company address is required"}, 400)
+    if not _ADDRESS_RE.match(address):
+        return _json_response(
+            {"error": "Address can only contain letters, numbers, spaces, and , . - / # &  (no ! @ or other symbols)"},
+            400,
+        )
     if gst_number and not re.match(r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$', gst_number.upper()):
         return _json_response({"error": "Enter a valid 15-character GSTIN, or leave it blank."}, 400)
 
