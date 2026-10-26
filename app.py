@@ -2166,16 +2166,22 @@ def _brand_for_url(url: str) -> dict:
 
 def _company_brand(tenant_id: str, redirect_to: str) -> dict | None:
     """Skin the simulated sign-in page as the recipient's own company, using
-    the tenant's name, logo and primary colour from their settings. Returns
-    None for the default/system tenant so the caller falls back to a brand."""
-    if not tenant_id or tenant_id == "default":
-        return None
+    the tenant's name, logo and primary colour from their settings.
+
+    Applies to the "default" tenant too - it's a real, configurable tenant
+    with its own name/logo/colour (Settings), not a placeholder; a campaign
+    run from it should show Workmate Shield's own branding rather than
+    always falling back to guessing a brand from the redirect URL. Returns
+    None (letting the caller fall back to URL-based brand detection) only
+    when nothing has actually been configured - including a fresh "default"
+    tenant that still has the schema's literal placeholder name."""
+    tenant_id = tenant_id or "default"
     try:
         raw = TenantService(tenant_id=tenant_id).get_settings_raw()
     except Exception:
         return None
     name = (raw.get("name") or "").strip()
-    if not name:
+    if not name or (tenant_id == "default" and name == "Default Company"):
         return None
     color = (raw.get("primary_color") or "#7a1220").strip() or "#7a1220"
     tagline = (raw.get("tagline") or "").strip() or "Build. Grow. Together."
@@ -2664,29 +2670,38 @@ def upload_image():
     return _json_response({'url': public_url})
 
 
-_ALLOWED_VIDEO_EXTS = {'.mp4', '.webm'}
+_ALLOWED_VIDEO_EXTS = {'.mp4', '.webm', '.pdf', '.ppt', '.pptx'}
 _MAX_VIDEO_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
 def _video_signature_matches(ext: str, data: bytes) -> bool:
-    """Check the leading bytes match the claimed video container type -
-    same "don't trust the extension/Content-Type alone" rule as images."""
+    """Check the leading bytes match the claimed training-resource file
+    type - same "don't trust the extension/Content-Type alone" rule as
+    images. Despite the name, this now covers the non-video document types
+    (PDF/PPT/PPTX) accepted alongside video for the training resource."""
     if ext == '.mp4':
         # MP4/MOV family: an ftyp box in the first few hundred bytes (not
         # necessarily at byte 0 - some encoders write a small leading atom).
         return b'ftyp' in data[:512]
     if ext == '.webm':
         return data[:4] == b'\x1a\x45\xdf\xa3'  # EBML header (WebM/Matroska)
+    if ext == '.pdf':
+        return data[:5] == b'%PDF-'
+    if ext == '.ppt':
+        return data[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'  # legacy OLE2
+    if ext == '.pptx':
+        return data[:4] == b'PK\x03\x04'  # ZIP/OOXML container
     return False
 
 
 @app.route("/api/phish/upload/video", methods=["POST", "OPTIONS"])
 def upload_video():
-    """Campaign training-video upload. Stored the same way as template/logo
-    images (see upload_image above) and referenced via the campaign's
-    existing training_url field - an uploaded video is just a URL that
-    happens to point at our own /static/uploads/*.mp4|.webm instead of
-    somewhere like YouTube, so no schema change or parallel field is needed."""
+    """Campaign training-resource upload: a video, or a PDF/PPT/PPTX
+    document. Stored the same way as template/logo images (see upload_image
+    above) and referenced via the campaign's existing training_url field -
+    an uploaded resource is just a URL that happens to point at our own
+    /static/uploads/* instead of somewhere like YouTube, so no schema
+    change or parallel field is needed."""
     if request.method == "OPTIONS":
         resp = make_response('', 204)
         resp.headers['Access-Control-Allow-Origin']  = '*'
@@ -2710,11 +2725,11 @@ def upload_video():
     # them fully in memory, so reading this is fine even near the 50 MB cap.
     data = file.read()
     if len(data) > _MAX_VIDEO_BYTES:
-        return _json_response({'error': 'Video exceeds the 50 MB limit'}, 400)
+        return _json_response({'error': 'File exceeds the 50 MB limit'}, 400)
     if not data:
         return _json_response({'error': 'The uploaded file is empty'}, 400)
     if not _video_signature_matches(ext, data):
-        return _json_response({'error': f'File content does not look like a valid {ext} video'}, 400)
+        return _json_response({'error': f'File content does not look like a valid {ext} file'}, 400)
 
     filename = f"{uuid.uuid4().hex}{ext}"
     dest = _UPLOADS_DIR / filename
@@ -3483,10 +3498,10 @@ def public_register():
     if not _EMAIL_RE.match(contact_email):
         return _json_response({"error": "Enter a valid email address"}, 400)
     # Mirrors the frontend's zod rule exactly - optional, but if given it
-    # must be a 10-digit number starting with 6. A client-only check lets
-    # anyone post straight to this API and skip it entirely.
-    if contact_mobile and not re.match(r"^6\d{9}$", contact_mobile):
-        return _json_response({"error": "Mobile number must start with 6 and be 10 digits"}, 400)
+    # must be a 10-digit number. A client-only check lets anyone post
+    # straight to this API and skip it entirely.
+    if contact_mobile and not re.match(r"^\d{10}$", contact_mobile):
+        return _json_response({"error": "Mobile number must be 10 digits"}, 400)
 
     reg_svc = RegistrationService()
     registration, raw_token = reg_svc.create_registration(
