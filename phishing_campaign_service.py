@@ -385,7 +385,10 @@ def _init_db():
             # connection on every retry until the pool is exhausted and
             # unrelated queries elsewhere in the app start failing too.
             conn.close()
-    logging.info(f"SQLite schema initialised at {_DB_PATH}.")
+    if _using_postgres():
+        logging.info("Postgres schema initialised.")
+    else:
+        logging.info(f"SQLite schema initialised at {_DB_PATH}.")
 
 
 # DB is initialised lazily on first use – not at import time.
@@ -745,9 +748,10 @@ class PhishingCampaignService:
             if cursor.fetchone() is None:
                 conn.close()
                 return False
-            cursor.execute("DELETE FROM events     WHERE campaign_id = ?", (campaign_id,))
-            cursor.execute("DELETE FROM recipients WHERE campaign_id = ?", (campaign_id,))
-            cursor.execute("DELETE FROM campaigns  WHERE id = ? AND tenant_id = ?", (campaign_id, self.tenant_id))
+            cursor.execute("DELETE FROM events      WHERE campaign_id = ?", (campaign_id,))
+            cursor.execute("DELETE FROM recipients  WHERE campaign_id = ?", (campaign_id,))
+            cursor.execute("DELETE FROM send_jobs   WHERE campaign_id = ?", (campaign_id,))
+            cursor.execute("DELETE FROM campaigns   WHERE id = ? AND tenant_id = ?", (campaign_id, self.tenant_id))
             affected = cursor.rowcount
             conn.commit()
             conn.close()
